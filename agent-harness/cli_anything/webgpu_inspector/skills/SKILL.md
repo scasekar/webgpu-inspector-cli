@@ -9,8 +9,11 @@ CLI tool for debugging WebGPU applications. Launches a browser, injects the WebG
 
 ## Prerequisites
 
-- `pip install cli-anything-webgpu-inspector` (or `pip install -e .` from agent-harness/)
-- `python -m playwright install chromium`
+```bash
+git clone --recurse-submodules https://github.com/scasekar/webgpu-inspector-cli
+cd webgpu-inspector-cli/agent-harness && pip install -e .
+python -m playwright install chromium
+```
 
 ## Quick Start
 

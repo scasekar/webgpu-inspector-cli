@@ -1,7 +1,7 @@
 from setuptools import setup, find_namespace_packages
 
 setup(
-    name="cli-anything-webgpu-inspector",
+    name="webgpu-inspector-cli",
     version="0.1.0",
     description="CLI tool for WebGPU Inspector - debug WebGPU applications from the command line",
     author="Arvind Sekar",
