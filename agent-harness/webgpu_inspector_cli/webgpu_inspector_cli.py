@@ -2,12 +2,12 @@
 
 import click
 
-from cli_anything.webgpu_inspector.commands.browser import browser
-from cli_anything.webgpu_inspector.commands.objects import objects
-from cli_anything.webgpu_inspector.commands.capture import capture
-from cli_anything.webgpu_inspector.commands.shaders import shaders
-from cli_anything.webgpu_inspector.commands.errors import errors
-from cli_anything.webgpu_inspector.commands.status import status
+from webgpu_inspector_cli.commands.browser import browser
+from webgpu_inspector_cli.commands.objects import objects
+from webgpu_inspector_cli.commands.capture import capture
+from webgpu_inspector_cli.commands.shaders import shaders
+from webgpu_inspector_cli.commands.errors import errors
+from webgpu_inspector_cli.commands.status import status
 
 
 @click.group(invoke_without_command=True)
@@ -25,12 +25,12 @@ def cli(ctx, use_json):
 def repl():
     """Start interactive REPL mode."""
     try:
-        from cli_anything.webgpu_inspector.utils.repl_skin import ReplSkin
+        from webgpu_inspector_cli.utils.repl_skin import ReplSkin
     except ImportError:
         click.echo("REPL mode requires prompt_toolkit. Install with: pip install prompt_toolkit")
         return
 
-    from cli_anything.webgpu_inspector import __version__
+    from webgpu_inspector_cli import __version__
 
     skin = ReplSkin("webgpu-inspector", version=__version__)
     skin.print_banner()

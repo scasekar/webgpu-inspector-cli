@@ -11,7 +11,7 @@ from pathlib import Path
 
 class TestSession:
     def setup_method(self):
-        from cli_anything.webgpu_inspector.core.session import Session
+        from webgpu_inspector_cli.core.session import Session
         self.session = Session()
 
     def test_push_pop_shader_edit(self):
@@ -56,27 +56,27 @@ class TestSession:
 
 class TestBridgePaths:
     def test_find_inspector_js(self):
-        from cli_anything.webgpu_inspector.core.bridge import _find_inspector_js
+        from webgpu_inspector_cli.core.bridge import _find_inspector_js
         path = _find_inspector_js()
         assert path.exists()
         assert path.name == "webgpu_inspector_loader.js"
 
     def test_find_collector_js(self):
-        from cli_anything.webgpu_inspector.core.bridge import _find_collector_js
+        from webgpu_inspector_cli.core.bridge import _find_collector_js
         path = _find_collector_js()
         assert path.exists()
         assert path.name == "collector.js"
 
     def test_bridge_not_connected(self):
-        from cli_anything.webgpu_inspector.core.bridge import Bridge
+        from webgpu_inspector_cli.core.bridge import Bridge
         bridge = Bridge()
         assert not bridge.is_connected
         with pytest.raises(RuntimeError, match="No browser session"):
             bridge.query("getSummary")
 
     def test_bridge_require_not_connected(self):
-        from cli_anything.webgpu_inspector.core.bridge import require_bridge, Bridge
-        import cli_anything.webgpu_inspector.core.bridge as bridge_mod
+        from webgpu_inspector_cli.core.bridge import require_bridge, Bridge
+        import webgpu_inspector_cli.core.bridge as bridge_mod
         # Reset global singleton
         bridge_mod._bridge = Bridge()
         with pytest.raises(RuntimeError, match="No active browser session"):
@@ -88,25 +88,25 @@ class TestBridgePaths:
 
 class TestFormatHelpers:
     def test_format_bytes_zero(self):
-        from cli_anything.webgpu_inspector.commands.objects import _format_bytes
+        from webgpu_inspector_cli.commands.objects import _format_bytes
         assert _format_bytes(0) == "0 B"
 
     def test_format_bytes_small(self):
-        from cli_anything.webgpu_inspector.commands.objects import _format_bytes
+        from webgpu_inspector_cli.commands.objects import _format_bytes
         assert _format_bytes(512) == "512 B"
 
     def test_format_bytes_kb(self):
-        from cli_anything.webgpu_inspector.commands.objects import _format_bytes
+        from webgpu_inspector_cli.commands.objects import _format_bytes
         result = _format_bytes(2048)
         assert "KB" in result
 
     def test_format_bytes_mb(self):
-        from cli_anything.webgpu_inspector.commands.objects import _format_bytes
+        from webgpu_inspector_cli.commands.objects import _format_bytes
         result = _format_bytes(4608000)
         assert "MB" in result
 
     def test_format_bytes_none(self):
-        from cli_anything.webgpu_inspector.commands.objects import _format_bytes
+        from webgpu_inspector_cli.commands.objects import _format_bytes
         assert _format_bytes(None) == "0 B"
 
 
@@ -114,7 +114,7 @@ class TestFormatHelpers:
 
 class TestCollectorJS:
     def test_collector_js_exists_and_valid(self):
-        from cli_anything.webgpu_inspector.core.bridge import _find_collector_js
+        from webgpu_inspector_cli.core.bridge import _find_collector_js
         path = _find_collector_js()
         content = path.read_text()
         # Check it defines window.__wgi
@@ -127,7 +127,7 @@ class TestCollectorJS:
         assert "CaptureFrameResults" in content
 
     def test_collector_has_query_api(self):
-        from cli_anything.webgpu_inspector.core.bridge import _find_collector_js
+        from webgpu_inspector_cli.core.bridge import _find_collector_js
         content = _find_collector_js().read_text()
         # Check all query functions exist
         for fn in ["getObjects", "getObject", "getErrors", "getFrameRate",
@@ -141,11 +141,11 @@ class TestCollectorJS:
 
 class TestCLIStructure:
     def test_cli_import(self):
-        from cli_anything.webgpu_inspector.webgpu_inspector_cli import cli
+        from webgpu_inspector_cli.webgpu_inspector_cli import cli
         assert cli is not None
 
     def test_cli_has_commands(self):
-        from cli_anything.webgpu_inspector.webgpu_inspector_cli import cli
+        from webgpu_inspector_cli.webgpu_inspector_cli import cli
         command_names = set(cli.commands.keys())
         expected = {"browser", "objects", "capture", "shaders", "errors", "status", "repl"}
         assert expected.issubset(command_names)

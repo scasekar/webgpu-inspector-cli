@@ -3,7 +3,7 @@
 import json
 import click
 
-from cli_anything.webgpu_inspector.core.bridge import require_bridge
+from webgpu_inspector_cli.core.bridge import require_bridge
 
 
 def _format_bytes(n):

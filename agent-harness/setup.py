@@ -1,4 +1,4 @@
-from setuptools import setup, find_namespace_packages
+from setuptools import setup, find_packages
 
 setup(
     name="webgpu-inspector-cli",
@@ -6,9 +6,9 @@ setup(
     description="CLI tool for WebGPU Inspector - debug WebGPU applications from the command line",
     author="Arvind Sekar",
     python_requires=">=3.10",
-    packages=find_namespace_packages(include=["cli_anything.*"]),
+    packages=find_packages(),
     package_data={
-        "cli_anything.webgpu_inspector": ["js/*.js", "skills/*.md"],
+        "webgpu_inspector_cli": ["js/*.js", "skills/*.md"],
     },
     install_requires=[
         "click>=8.0",
@@ -18,7 +18,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "cli-anything-webgpu-inspector=cli_anything.webgpu_inspector.webgpu_inspector_cli:cli",
+            "webgpu-inspector-cli=webgpu_inspector_cli.webgpu_inspector_cli:cli",
         ],
     },
 )

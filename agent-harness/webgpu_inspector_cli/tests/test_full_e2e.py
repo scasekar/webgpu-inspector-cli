@@ -12,13 +12,13 @@ import time
 import pytest
 from pathlib import Path
 
-from cli_anything.webgpu_inspector.core.bridge import Bridge
+from webgpu_inspector_cli.core.bridge import Bridge
 
 
 def _get_test_page_url(page_name="triangle.html"):
     """Get file:// URL for a test page from the submodule."""
-    pkg_dir = Path(__file__).resolve().parent.parent
-    repo_root = pkg_dir.parent.parent.parent.parent
+    pkg_dir = Path(__file__).resolve().parent.parent  # webgpu_inspector_cli/
+    repo_root = pkg_dir.parent.parent  # webgpu-inspector-cli/
     test_dir = repo_root / "webgpu_inspector" / "test"
     page = test_dir / page_name
     if not page.exists():
@@ -36,9 +36,9 @@ def _resolve_cli(name):
         return [path]
     if force:
         raise RuntimeError(f"{name} not found in PATH. Install with: pip install -e .")
-    module = "cli_anything.webgpu_inspector.webgpu_inspector_cli"
+    module = "webgpu_inspector_cli.webgpu_inspector_cli"
     print(f"[_resolve_cli] Falling back to: {sys.executable} -m {module}")
-    return [sys.executable, "-m", "cli_anything.webgpu_inspector"]
+    return [sys.executable, "-m", "webgpu_inspector_cli"]
 
 
 @pytest.fixture(scope="module")
@@ -147,7 +147,7 @@ class TestRuntimeMonitoring:
 # --- CLI Subprocess Tests ---
 
 class TestCLISubprocess:
-    CLI_BASE = _resolve_cli("cli-anything-webgpu-inspector")
+    CLI_BASE = _resolve_cli("webgpu-inspector-cli")
 
     def _run(self, args, check=True):
         return subprocess.run(

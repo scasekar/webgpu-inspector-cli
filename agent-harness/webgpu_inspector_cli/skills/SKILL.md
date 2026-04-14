@@ -1,9 +1,9 @@
 ---
-name: "cli-anything-webgpu-inspector"
+name: "webgpu-inspector-cli"
 description: "Debug WebGPU applications from the command line - inspect GPU objects, view shaders, capture frames, check validation errors"
 ---
 
-# cli-anything-webgpu-inspector
+# webgpu-inspector-cli
 
 CLI tool for debugging WebGPU applications. Launches a browser, injects the WebGPU Inspector, and provides commands to inspect GPU state.
 
@@ -19,24 +19,24 @@ python -m playwright install chromium
 
 ```bash
 # 1. Launch browser with your WebGPU app
-cli-anything-webgpu-inspector browser launch --url https://your-app.com
+webgpu-inspector-cli browser launch --url https://your-app.com
 
 # 2. Check for problems
-cli-anything-webgpu-inspector --json errors list
-cli-anything-webgpu-inspector --json status summary
+webgpu-inspector-cli --json errors list
+webgpu-inspector-cli --json status summary
 
 # 3. Inspect GPU objects
-cli-anything-webgpu-inspector --json objects list
-cli-anything-webgpu-inspector --json objects inspect --id 8
+webgpu-inspector-cli --json objects list
+webgpu-inspector-cli --json objects inspect --id 8
 
 # 4. View shader code
-cli-anything-webgpu-inspector shaders view --id 8
+webgpu-inspector-cli shaders view --id 8
 
 # 5. Capture a frame
-cli-anything-webgpu-inspector --json capture frame
+webgpu-inspector-cli --json capture frame
 
 # 6. Clean up
-cli-anything-webgpu-inspector browser close
+webgpu-inspector-cli browser close
 ```
 
 ## Command Groups

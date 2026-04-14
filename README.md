@@ -18,29 +18,29 @@ python -m playwright install chromium
 Verify the installation:
 
 ```bash
-cli-anything-webgpu-inspector --help
+webgpu-inspector-cli --help
 ```
 
 ## Quick Start
 
 ```bash
 # Launch browser and start inspecting
-cli-anything-webgpu-inspector browser launch --url https://your-webgpu-app.com
+webgpu-inspector-cli browser launch --url https://your-webgpu-app.com
 
 # Check for validation errors
-cli-anything-webgpu-inspector --json errors list
+webgpu-inspector-cli --json errors list
 
 # List all GPU objects
-cli-anything-webgpu-inspector --json objects list
+webgpu-inspector-cli --json objects list
 
 # View a shader's WGSL source
-cli-anything-webgpu-inspector shaders view --id 8
+webgpu-inspector-cli shaders view --id 8
 
 # Get a full status summary
-cli-anything-webgpu-inspector --json status summary
+webgpu-inspector-cli --json status summary
 
 # Close the browser when done
-cli-anything-webgpu-inspector browser close
+webgpu-inspector-cli browser close
 ```
 
 ## How It Works
@@ -78,9 +78,9 @@ This gives you the same inspection capabilities as the DevTools panel, without n
 All commands support the `--json` flag for machine-readable output. Place it on the root command:
 
 ```bash
-cli-anything-webgpu-inspector --json objects list
-cli-anything-webgpu-inspector --json status summary
-cli-anything-webgpu-inspector --json errors list
+webgpu-inspector-cli --json objects list
+webgpu-inspector-cli --json status summary
+webgpu-inspector-cli --json errors list
 ```
 
 Example output from `--json objects list`:
@@ -108,7 +108,7 @@ Example output from `--json objects list`:
 Running the CLI without a subcommand enters an interactive REPL with command history:
 
 ```bash
-cli-anything-webgpu-inspector
+webgpu-inspector-cli
 ```
 
 ## Command Reference
@@ -217,8 +217,8 @@ Shader edits support undo — the original code is saved before each compile so 
 ### Diagnosing Validation Errors
 
 ```bash
-cli-anything-webgpu-inspector browser launch --url http://localhost:8080
-cli-anything-webgpu-inspector --json errors list
+webgpu-inspector-cli browser launch --url http://localhost:8080
+webgpu-inspector-cli --json errors list
 ```
 
 Each error includes the validation message and the creation stacktrace pinpointing the offending API call.
@@ -227,52 +227,52 @@ Each error includes the validation message and the creation stacktrace pinpointi
 
 ```bash
 # What GPU objects exist?
-cli-anything-webgpu-inspector --json objects list
+webgpu-inspector-cli --json objects list
 
 # Is the expected pipeline there?
-cli-anything-webgpu-inspector --json objects list --type RenderPipeline
+webgpu-inspector-cli --json objects list --type RenderPipeline
 
 # Inspect its descriptor (vertex/fragment config, blend state, etc.)
-cli-anything-webgpu-inspector --json objects inspect --id 9
+webgpu-inspector-cli --json objects inspect --id 9
 
 # Look at the shader it uses
-cli-anything-webgpu-inspector shaders view --id 8
+webgpu-inspector-cli shaders view --id 8
 ```
 
 ### Shader Debugging with Hot-Reload
 
 ```bash
 # View current shader
-cli-anything-webgpu-inspector shaders view --id 8
+webgpu-inspector-cli shaders view --id 8
 
 # Edit locally, then hot-reload
-cli-anything-webgpu-inspector shaders compile --id 8 --file fixed_shader.wgsl
+webgpu-inspector-cli shaders compile --id 8 --file fixed_shader.wgsl
 
 # Didn't work? Revert
-cli-anything-webgpu-inspector shaders revert --id 8
+webgpu-inspector-cli shaders revert --id 8
 ```
 
 ### Inspecting Render Targets
 
 ```bash
 # Capture a frame
-cli-anything-webgpu-inspector --json capture frame
+webgpu-inspector-cli --json capture frame
 
 # List all textures
-cli-anything-webgpu-inspector --json objects list --type Texture
+webgpu-inspector-cli --json objects list --type Texture
 
 # Save a render target as PNG for visual inspection
-cli-anything-webgpu-inspector capture texture --id 6 -o render_target.png
+webgpu-inspector-cli capture texture --id 6 -o render_target.png
 ```
 
 ### Performance Profiling
 
 ```bash
-cli-anything-webgpu-inspector --json status summary
-cli-anything-webgpu-inspector status fps
-cli-anything-webgpu-inspector --json status memory
-cli-anything-webgpu-inspector --json objects list --type Buffer   # find large buffers
-cli-anything-webgpu-inspector --json objects list --type Texture  # find large textures
+webgpu-inspector-cli --json status summary
+webgpu-inspector-cli status fps
+webgpu-inspector-cli --json status memory
+webgpu-inspector-cli --json objects list --type Buffer   # find large buffers
+webgpu-inspector-cli --json objects list --type Texture  # find large textures
 ```
 
 ## Claude Code Plugin
@@ -292,24 +292,23 @@ webgpu-inspector-cli/
 ├── webgpu_inspector/              # Git submodule (WebGPU Inspector source)
 ├── agent-harness/
 │   ├── setup.py                   # Package config
-│   └── cli_anything/
-│       └── webgpu_inspector/
-│           ├── webgpu_inspector_cli.py   # CLI entry point
-│           ├── core/
-│           │   ├── bridge.py      # Playwright CDP bridge
-│           │   └── session.py     # Shader edit undo/redo
-│           ├── commands/          # Click command groups
-│           │   ├── browser.py
-│           │   ├── objects.py
-│           │   ├── capture.py
-│           │   ├── shaders.py
-│           │   ├── errors.py
-│           │   └── status.py
-│           ├── js/
-│           │   └── collector.js   # Injected event collector
-│           └── tests/
-│               ├── test_core.py       # 19 unit tests
-│               └── test_full_e2e.py   # 16 E2E tests
+│   └── webgpu_inspector_cli/
+│       ├── webgpu_inspector_cli.py   # CLI entry point
+│       ├── core/
+│       │   ├── bridge.py      # Playwright CDP bridge
+│       │   └── session.py     # Shader edit undo/redo
+│       ├── commands/          # Click command groups
+│       │   ├── browser.py
+│       │   ├── objects.py
+│       │   ├── capture.py
+│       │   ├── shaders.py
+│       │   ├── errors.py
+│       │   └── status.py
+│       ├── js/
+│       │   └── collector.js   # Injected event collector
+│       └── tests/
+│           ├── test_core.py       # 19 unit tests
+│           └── test_full_e2e.py   # 16 E2E tests
 └── examples/
 ```
 
@@ -319,13 +318,13 @@ webgpu-inspector-cli/
 cd agent-harness
 
 # Unit tests (fast, no browser)
-pytest cli_anything/webgpu_inspector/tests/test_core.py -v
+pytest webgpu_inspector_cli/tests/test_core.py -v
 
 # E2E tests (launches real browser with test pages)
-pytest cli_anything/webgpu_inspector/tests/test_full_e2e.py -v -s
+pytest webgpu_inspector_cli/tests/test_full_e2e.py -v -s
 
 # All tests
-pytest cli_anything/webgpu_inspector/tests/ -v -s
+pytest webgpu_inspector_cli/tests/ -v -s
 ```
 
 ## License
@@ -335,4 +334,4 @@ MIT
 ## Credits
 
 - [WebGPU Inspector](https://github.com/brendan-duncan/webgpu_inspector) by Brendan Duncan
-- Built with the [cli-anything](https://github.com/HKUDS/CLI-Anything) methodology
+- Built with the [CLI-Anything](https://github.com/HKUDS/CLI-Anything) methodology

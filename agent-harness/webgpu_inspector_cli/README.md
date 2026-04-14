@@ -1,4 +1,4 @@
-# cli-anything-webgpu-inspector
+# webgpu-inspector-cli
 
 CLI tool for the [WebGPU Inspector](https://github.com/brendan-duncan/webgpu_inspector) browser extension. Lets AI agents inspect and debug WebGPU applications from the command line.
 
@@ -26,31 +26,31 @@ git submodule update --init
 
 ```bash
 # Launch browser and inspect a WebGPU app
-cli-anything-webgpu-inspector browser launch --url https://your-webgpu-app.com
+webgpu-inspector-cli browser launch --url https://your-webgpu-app.com
 
 # List all GPU objects
-cli-anything-webgpu-inspector objects list --json
+webgpu-inspector-cli objects list --json
 
 # View shader code
-cli-anything-webgpu-inspector shaders view --id 8
+webgpu-inspector-cli shaders view --id 8
 
 # Check for validation errors
-cli-anything-webgpu-inspector errors list --json
+webgpu-inspector-cli errors list --json
 
 # Get GPU state summary
-cli-anything-webgpu-inspector status summary --json
+webgpu-inspector-cli status summary --json
 
 # Capture a frame
-cli-anything-webgpu-inspector capture frame --json
+webgpu-inspector-cli capture frame --json
 
 # Close browser
-cli-anything-webgpu-inspector browser close
+webgpu-inspector-cli browser close
 ```
 
 ### REPL mode
 
 ```bash
-cli-anything-webgpu-inspector
+webgpu-inspector-cli
 # Enters interactive REPL with command history and completion
 ```
 
@@ -59,7 +59,7 @@ cli-anything-webgpu-inspector
 All commands support `--json` for machine-readable output:
 
 ```bash
-cli-anything-webgpu-inspector --json objects list
+webgpu-inspector-cli --json objects list
 ```
 
 ## Command Groups
@@ -83,8 +83,8 @@ This means you get the same inspection data as the DevTools panel, without needi
 
 ```bash
 # Unit tests
-pytest cli_anything/webgpu_inspector/tests/test_core.py -v
+pytest webgpu_inspector_cli/tests/test_core.py -v
 
 # E2E tests (launches real browser)
-pytest cli_anything/webgpu_inspector/tests/test_full_e2e.py -v -s
+pytest webgpu_inspector_cli/tests/test_full_e2e.py -v -s
 ```

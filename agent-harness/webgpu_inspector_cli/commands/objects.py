@@ -3,7 +3,7 @@
 import json
 import click
 
-from cli_anything.webgpu_inspector.core.bridge import require_bridge
+from webgpu_inspector_cli.core.bridge import require_bridge
 
 GPU_TYPES = [
     "Adapter", "Device", "Buffer", "Texture", "TextureView", "Sampler",

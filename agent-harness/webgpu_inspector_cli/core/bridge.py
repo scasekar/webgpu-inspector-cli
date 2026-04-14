@@ -11,8 +11,8 @@ from playwright.sync_api import sync_playwright, Browser, Page, BrowserContext
 def _find_inspector_js():
     """Locate the built webgpu_inspector_loader.js from the submodule."""
     # Walk up from this file to find the repo root
-    pkg_dir = Path(__file__).resolve().parent.parent  # cli_anything/webgpu_inspector/
-    repo_root = pkg_dir.parent.parent.parent.parent  # webgpu-inspector-cli/
+    pkg_dir = Path(__file__).resolve().parent.parent  # webgpu_inspector_cli/
+    repo_root = pkg_dir.parent.parent  # webgpu-inspector-cli/
     loader_path = repo_root / "webgpu_inspector" / "extensions" / "chrome" / "webgpu_inspector_loader.js"
     if loader_path.exists():
         return loader_path

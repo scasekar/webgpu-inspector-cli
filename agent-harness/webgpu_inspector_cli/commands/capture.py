@@ -5,7 +5,7 @@ import json
 import time
 import click
 
-from cli_anything.webgpu_inspector.core.bridge import require_bridge
+from webgpu_inspector_cli.core.bridge import require_bridge
 
 
 @click.group()
