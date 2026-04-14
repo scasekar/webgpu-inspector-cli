@@ -1,0 +1,3 @@
+[submodule "webgpu_inspector"]
+	path = webgpu_inspector
+	url = /Users/asekar/code/webgpu_inspector
