@@ -9,6 +9,12 @@ The CLI launches a browser, injects the WebGPU Inspector directly into any web p
 **Requirements:** Python 3.10+, Chrome/Chromium
 
 ```bash
+pip install webgpu-inspector-cli
+python -m playwright install chromium
+```
+
+Or from source:
+```bash
 git clone --recurse-submodules https://github.com/scasekar/webgpu-inspector-cli
 cd webgpu-inspector-cli/agent-harness
 pip install -e .
