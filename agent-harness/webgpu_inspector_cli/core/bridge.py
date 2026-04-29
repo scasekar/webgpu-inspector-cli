@@ -173,32 +173,64 @@ class Bridge:
         self._inspector_injected = True
 
     def _attach_console_capture(self, path: str) -> None:
-        """Open `path` for line-buffered writes and forward console events to it."""
+        """Open `path` for line-buffered writes and forward console events to it.
+
+        Each line is `[<timestamp>] <JSON object>` so the file is grep-friendly
+        but each entry is a single self-contained record. The previous format
+        split pageerror events across multiple lines (one for `ErrorEvent`,
+        one for the underlying exception); this one keeps name + message +
+        stack together.
+        """
         # Resolve and create parent dirs so users can pass relative paths.
         log_path = Path(path).expanduser().resolve()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "w", buffering=1, encoding="utf-8")
         self._console_log_file = log_file
 
-        def on_console(msg) -> None:
+        def _ts() -> str:
+            return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+
+        def _emit(record: dict) -> None:
             try:
-                ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-                loc = ""
-                try:
-                    info = msg.location  # {url, line_number, column_number}
-                    if info and info.get("url"):
-                        loc = f" ({info['url']}:{info.get('line_number', 0)})"
-                except Exception:
-                    pass
-                log_file.write(f"[{ts}] [{msg.type}]{loc} {msg.text}\n")
+                # Single JSON line per event so consumers can parse with
+                # `jq -c '.'` or grep on a single field.
+                log_file.write(f"[{record['timestamp']}] {json.dumps(record)}\n")
             except Exception:
                 # Never let logging crash the page session.
                 pass
 
-        def on_pageerror(exc) -> None:
+        def on_console(msg) -> None:
             try:
-                ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-                log_file.write(f"[{ts}] [pageerror] {exc}\n")
+                rec = {
+                    "timestamp": _ts(),
+                    "kind": "console",
+                    "level": msg.type,
+                    "text": msg.text,
+                }
+                try:
+                    loc = msg.location
+                    if loc and loc.get("url"):
+                        rec["url"] = loc.get("url")
+                        rec["line"] = loc.get("line_number")
+                        rec["column"] = loc.get("column_number")
+                except Exception:
+                    pass
+                _emit(rec)
+            except Exception:
+                pass
+
+        def on_pageerror(exc) -> None:
+            # Playwright passes the page error as the JS Error itself; common
+            # attrs: message, name, stack. Coerce robustly.
+            try:
+                rec = {
+                    "timestamp": _ts(),
+                    "kind": "pageerror",
+                    "message": getattr(exc, "message", None) or str(exc),
+                    "name": getattr(exc, "name", None) or "Error",
+                    "stack": getattr(exc, "stack", None),
+                }
+                _emit(rec)
             except Exception:
                 pass
 

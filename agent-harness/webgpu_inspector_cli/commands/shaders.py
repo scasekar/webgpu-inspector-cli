@@ -13,12 +13,32 @@ def shaders():
     pass
 
 
+def _shader_code_length(obj: dict) -> int:
+    """Pull the WGSL source length off a ShaderModule descriptor."""
+    desc = obj.get("descriptor") or {}
+    code = desc.get("code") if isinstance(desc, dict) else None
+    if isinstance(code, str):
+        return len(code)
+    # Fall back to whatever the inspector reports as size.
+    sz = obj.get("size") or 0
+    try:
+        return int(sz)
+    except Exception:
+        return 0
+
+
 @shaders.command("list")
 @click.pass_context
 def list_shaders(ctx):
-    """List all shader modules."""
+    """List all shader modules.
+
+    Each entry includes `codeLength` (bytes of WGSL source) so you can tell
+    a stub apart from a 30kB compute shader without fetching the full source.
+    """
     bridge = require_bridge()
-    result = bridge.query("getObjects", "ShaderModule")
+    result = bridge.query("getObjects", "ShaderModule") or []
+    for s in result:
+        s["codeLength"] = _shader_code_length(s)
 
     if ctx.obj.get("json"):
         click.echo(json.dumps({"shaders": result, "count": len(result)}, indent=2))
@@ -30,8 +50,7 @@ def list_shaders(ctx):
         click.echo("-" * 50)
         for obj in result:
             label = obj.get("label") or ""
-            size = obj.get("size", 0)
-            click.echo(f"{obj['id']:>6}  {label:<30}  {size:>10} chars")
+            click.echo(f"{obj['id']:>6}  {label:<30}  {obj['codeLength']:>10} chars")
         click.echo(f"\nTotal: {len(result)} shader modules")
 
 

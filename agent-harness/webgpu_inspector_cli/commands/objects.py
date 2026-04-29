@@ -46,8 +46,10 @@ def objects():
 @objects.command("list")
 @click.option("--type", "obj_type", type=click.Choice(GPU_TYPES, case_sensitive=False),
               default=None, help="Filter by object type.")
+@click.option("--label", "label_substring", type=str, default=None,
+              help="Case-insensitive substring filter on object label.")
 @click.pass_context
-def list_objects(ctx, obj_type):
+def list_objects(ctx, obj_type, label_substring):
     """List all live GPU objects.
 
     For Buffers, decoded GPUBufferUsage flags (Storage, Indirect, CopyDst, etc.)
@@ -56,6 +58,13 @@ def list_objects(ctx, obj_type):
     """
     bridge = require_bridge()
     result = bridge.query("getObjects", obj_type)
+
+    if label_substring:
+        needle = label_substring.lower()
+        result = [
+            o for o in result
+            if o.get("label") and needle in o["label"].lower()
+        ]
 
     is_buffer_view = obj_type and obj_type.lower() == "buffer"
 
@@ -150,11 +159,13 @@ def inspect(ctx, obj_id):
 
 @objects.command()
 @click.option("--label", required=True, help="Label substring to search for.")
+@click.option("--type", "obj_type", type=click.Choice(GPU_TYPES, case_sensitive=False),
+              default=None, help="Optional object-type filter to narrow the search.")
 @click.pass_context
-def search(ctx, label):
-    """Find objects by label."""
+def search(ctx, label, obj_type):
+    """Find objects by label, optionally narrowed to a single GPU object type."""
     bridge = require_bridge()
-    all_objs = bridge.query("getObjects", None)
+    all_objs = bridge.query("getObjects", obj_type)
     matched = [o for o in all_objs if o.get("label") and label.lower() in o["label"].lower()]
 
     if ctx.obj.get("json"):

@@ -1,3 +1,3 @@
 """CLI tool for WebGPU Inspector - debug WebGPU applications from the command line."""
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"

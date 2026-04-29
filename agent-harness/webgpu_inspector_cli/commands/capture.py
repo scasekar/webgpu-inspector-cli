@@ -56,9 +56,20 @@ def frame(ctx, timeout, poll_interval):
 
 @capture.command()
 @click.option("--pass-index", type=int, default=None, help="Filter by render pass index.")
+@click.option(
+    "--output", "-o", "output_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write the full captured-commands payload as JSON to this file. "
+         "Useful for large captures (thousands of commands) to avoid spamming the terminal.",
+)
 @click.pass_context
-def commands(ctx, pass_index):
-    """List GPU commands from a captured frame."""
+def commands(ctx, pass_index, output_path):
+    """List GPU commands from a captured frame.
+
+    Without --output the captured commands print to stdout. With --output the
+    JSON payload is written to disk and only a one-line summary is printed.
+    """
     bridge = require_bridge()
 
     status = bridge.query("getCaptureStatus")
@@ -66,32 +77,46 @@ def commands(ctx, pass_index):
         click.echo("No captured frame. Run 'capture frame' first.", err=True)
         raise SystemExit(1)
 
-    results = bridge.query("getCapturedFrameResults")
-    if not results:
-        click.echo("No capture data available.", err=True)
-        raise SystemExit(1)
+    payload = bridge.query("getCapturedCommands") or {}
+    summary = bridge.query("getCapturedFrameResults") or {}
+    cmds = payload.get("commands") if isinstance(payload, dict) else None
+
+    if output_path:
+        with open(output_path, "w") as f:
+            json.dump({"summary": summary, "payload": payload}, f, indent=2, default=str)
+        if ctx.obj.get("json"):
+            click.echo(json.dumps({
+                "status": "saved",
+                "path": output_path,
+                "frame": summary.get("frame"),
+                "count": len(cmds) if isinstance(cmds, list) else 0,
+            }))
+        else:
+            click.echo(
+                f"Wrote {output_path} (frame={summary.get('frame')}, "
+                f"count={len(cmds) if isinstance(cmds, list) else 0})"
+            )
+        return
 
     if ctx.obj.get("json"):
-        click.echo(json.dumps(results, indent=2))
-    else:
-        batches = results.get("batches", [])
-        if not batches:
-            click.echo("No command batches in capture.")
-            return
+        click.echo(json.dumps({"summary": summary, "payload": payload}, indent=2, default=str))
+        return
 
-        for i, batch in enumerate(batches):
-            if pass_index is not None and i != pass_index:
+    if not isinstance(cmds, list) or not cmds:
+        click.echo("No commands captured.")
+        return
+
+    click.echo(f"Frame {summary.get('frame', '?')}: {len(cmds)} commands")
+    for i, cmd in enumerate(cmds):
+        if pass_index is not None:
+            # Naive pass filter: count beginRenderPass to derive pass index.
+            # Kept consistent with prior behaviour even if approximate.
+            if cmd.get("method") != "beginRenderPass" and i != pass_index:
                 continue
-            cmds = batch.get("commands", batch) if isinstance(batch, dict) else batch
-            click.echo(f"Batch {i}:")
-            if isinstance(cmds, list):
-                for cmd in cmds:
-                    if isinstance(cmd, dict):
-                        click.echo(f"  {cmd.get('method', cmd.get('name', str(cmd)))}")
-                    else:
-                        click.echo(f"  {cmd}")
-            else:
-                click.echo(f"  {cmds}")
+        if isinstance(cmd, dict):
+            click.echo(f"  [{cmd.get('commandId', i)}] {cmd.get('method', '?')}")
+        else:
+            click.echo(f"  {cmd}")
 
 
 @capture.command()
@@ -205,8 +230,25 @@ _BUFFER_FORMATS = list(buffer_decoders.SUPPORTED_FORMATS)
     default=None,
     help="With --struct, limit output to the first N records.",
 )
+@click.option(
+    "--wait",
+    "wait_seconds",
+    type=float,
+    default=5.0,
+    help=(
+        "Seconds to wait for buffer data to arrive. Buffer reads land async "
+        "(via mapAsync) AFTER capture_frame returns; if the buffer is missing "
+        "right after a capture, give it more time before declaring failure."
+    ),
+)
+@click.option(
+    "--output", "-o", "output_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write the decoded text to this file instead of stdout (useful for large struct decodes).",
+)
 @click.pass_context
-def buffer(ctx, buf_id, offset, read_size, fmt, struct_spec, max_records):
+def buffer(ctx, buf_id, offset, read_size, fmt, struct_spec, max_records, wait_seconds, output_path):
     """Read buffer contents from the most recent captured frame.
 
     Requires a prior 'capture frame'. Returns the buffer state from that frame
@@ -214,12 +256,22 @@ def buffer(ctx, buf_id, offset, read_size, fmt, struct_spec, max_records):
     demand. If you don't see the buffer you expect, run 'capture frame' first.
     """
     bridge = require_bridge()
-    data = bridge.query("getBufferData", buf_id)
 
-    if not data:
+    # Buffer data lands async via mapAsync; poll briefly so a fast caller
+    # doesn't see a false negative right after capture_frame returned.
+    data = None
+    deadline = time.time() + max(wait_seconds, 0.0)
+    while time.time() < deadline:
+        data = bridge.query("getBufferData", buf_id)
+        if data and data.get("data"):
+            break
+        time.sleep(0.1)
+
+    if not data or not data.get("data"):
         click.echo(
-            f"No buffer data for #{buf_id}. Run 'capture frame' first — buffer "
-            "data is only populated during a frame capture, not on demand.",
+            f"No buffer data for #{buf_id}. The buffer may not have been bound "
+            "during the captured frame, or buffer reads are still in flight "
+            "(try a longer --wait). Run 'capture frame' first.",
             err=True,
         )
         raise SystemExit(1)
@@ -250,16 +302,32 @@ def buffer(ctx, buf_id, offset, read_size, fmt, struct_spec, max_records):
         click.echo(f"Decode error: {exc}", err=True)
         raise SystemExit(1)
 
+    summary = {
+        "bufferId": buf_id,
+        "offset": raw_offset + offset,
+        "size": len(sliced),
+        "totalSize": raw_size,
+        "format": "struct" if struct_spec else fmt.lower(),
+        "structSpec": struct_spec,
+    }
+
+    if output_path:
+        with open(output_path, "w") as f:
+            f.write(decoded)
+        summary["path"] = output_path
+        summary["chars"] = len(decoded)
+        if ctx.obj.get("json"):
+            click.echo(json.dumps(summary, indent=2))
+        else:
+            click.echo(
+                f"Buffer #{buf_id} ({len(sliced)} bytes, "
+                f"{'struct: ' + struct_spec if struct_spec else fmt.lower()}) "
+                f"→ {output_path} ({len(decoded)} chars)"
+            )
+        return
+
     if ctx.obj.get("json"):
-        click.echo(json.dumps({
-            "bufferId": buf_id,
-            "offset": raw_offset + offset,
-            "size": len(sliced),
-            "totalSize": raw_size,
-            "format": "struct" if struct_spec else fmt.lower(),
-            "structSpec": struct_spec,
-            "decoded": decoded,
-        }, indent=2))
+        click.echo(json.dumps({**summary, "decoded": decoded}, indent=2))
     else:
         click.echo(f"Buffer #{buf_id}:")
         click.echo(f"  Source offset: {raw_offset + offset}")
