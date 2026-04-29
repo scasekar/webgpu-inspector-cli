@@ -1,5 +1,7 @@
 """Main CLI entry point for WebGPU Inspector CLI."""
 
+import sys
+
 import click
 
 from webgpu_inspector_cli.commands.browser import browser
@@ -36,7 +38,7 @@ def repl():
     skin.print_banner()
 
     commands = {
-        "browser": "Browser session management (launch, close, navigate, screenshot, status)",
+        "browser": "Browser session management (launch, close, navigate, screenshot, status, eval, click, type, wait)",
         "objects": "GPU object inspection (list, inspect, search, memory)",
         "capture": "Frame capture and data inspection (frame, commands, texture, buffer)",
         "shaders": "Shader module inspection (list, view, compile, revert)",
@@ -74,6 +76,9 @@ def repl():
                 pass
             except click.exceptions.UsageError as e:
                 skin.error(str(e))
+            except RuntimeError as e:
+                # Friendly bridge errors and similar runtime errors — no traceback.
+                skin.error(str(e))
             except Exception as e:
                 skin.error(str(e))
 
@@ -89,3 +94,23 @@ cli.add_command(capture)
 cli.add_command(shaders)
 cli.add_command(errors)
 cli.add_command(status)
+
+
+def main():
+    """Console-script entry point.
+
+    Wraps `cli` so that RuntimeError from bridge.require_bridge (no active
+    session) prints a friendly message instead of a Python traceback.
+    """
+    try:
+        cli(standalone_mode=False)
+    except click.exceptions.UsageError as exc:
+        exc.show()
+        sys.exit(exc.exit_code)
+    except click.exceptions.Abort:
+        sys.exit(1)
+    except SystemExit:
+        raise
+    except RuntimeError as exc:
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(2)

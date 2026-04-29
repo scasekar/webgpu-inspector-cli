@@ -2,7 +2,7 @@
 
 import json
 import os
-import time
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, Browser, Page, BrowserContext
@@ -41,6 +41,7 @@ class Bridge:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._inspector_injected = False
+        self._console_log_file = None
 
     @property
     def page(self) -> Page | None:
@@ -50,8 +51,23 @@ class Bridge:
     def is_connected(self) -> bool:
         return self._page is not None and not self._page.is_closed()
 
-    def launch(self, url: str, headless: bool = False, gpu_backend: str | None = None):
-        """Launch browser, navigate to URL, and inject the inspector."""
+    def launch(
+        self,
+        url: str,
+        headless: bool = False,
+        gpu_backend: str | None = None,
+        capture_console_path: str | None = None,
+        user_data_dir: str | None = None,
+    ):
+        """Launch browser, navigate to URL, and inject the inspector.
+
+        capture_console_path: if set, console messages are written to this file
+            line-by-line. The listener is attached BEFORE navigation so page
+            bootstrap logs are captured.
+        user_data_dir: if set, Chrome runs with a persistent profile directory
+            (cookies, localStorage, extensions). Useful when the target app
+            depends on existing browser state.
+        """
         self._playwright = sync_playwright().start()
 
         args = [
@@ -61,12 +77,28 @@ class Bridge:
         if gpu_backend:
             args.append(f"--use-gl={gpu_backend}")
 
-        self._browser = self._playwright.chromium.launch(
-            headless=headless,
-            args=args,
-        )
-        self._context = self._browser.new_context()
-        self._page = self._context.new_page()
+        if user_data_dir:
+            # Persistent context: a single object that owns the browser lifetime.
+            self._context = self._playwright.chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                headless=headless,
+                args=args,
+            )
+            self._browser = None  # No separate Browser object in this mode.
+            # launch_persistent_context starts with one default page.
+            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        else:
+            self._browser = self._playwright.chromium.launch(
+                headless=headless,
+                args=args,
+            )
+            self._context = self._browser.new_context()
+            self._page = self._context.new_page()
+
+        # Attach console capture BEFORE navigation so page-bootstrap logs are recorded.
+        if capture_console_path:
+            self._attach_console_capture(capture_console_path)
+
         self._page.goto(url, wait_until="domcontentloaded")
         self._inject()
 
@@ -80,14 +112,32 @@ class Bridge:
 
     def close(self):
         """Shut down the browser and clean up resources."""
+        if self._console_log_file:
+            try:
+                self._console_log_file.close()
+            except Exception:
+                pass
+            self._console_log_file = None
+
+        # `launch_persistent_context` returns only a context (no Browser).
+        # `launch` + `new_context` returns both — closing the browser closes
+        # the context too. Be defensive in either direction.
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                pass
+            self._context = None
         if self._browser:
-            self._browser.close()
+            try:
+                self._browser.close()
+            except Exception:
+                pass
             self._browser = None
         if self._playwright:
             self._playwright.stop()
             self._playwright = None
         self._page = None
-        self._context = None
         self._inspector_injected = False
 
     def screenshot(self, output_path: str, full_page: bool = False) -> str:
@@ -122,6 +172,39 @@ class Bridge:
 
         self._inspector_injected = True
 
+    def _attach_console_capture(self, path: str) -> None:
+        """Open `path` for line-buffered writes and forward console events to it."""
+        # Resolve and create parent dirs so users can pass relative paths.
+        log_path = Path(path).expanduser().resolve()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "w", buffering=1, encoding="utf-8")
+        self._console_log_file = log_file
+
+        def on_console(msg) -> None:
+            try:
+                ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+                loc = ""
+                try:
+                    info = msg.location  # {url, line_number, column_number}
+                    if info and info.get("url"):
+                        loc = f" ({info['url']}:{info.get('line_number', 0)})"
+                except Exception:
+                    pass
+                log_file.write(f"[{ts}] [{msg.type}]{loc} {msg.text}\n")
+            except Exception:
+                # Never let logging crash the page session.
+                pass
+
+        def on_pageerror(exc) -> None:
+            try:
+                ts = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+                log_file.write(f"[{ts}] [pageerror] {exc}\n")
+            except Exception:
+                pass
+
+        self._page.on("console", on_console)
+        self._page.on("pageerror", on_pageerror)
+
     def query(self, fn_name: str, *args) -> object:
         """Call a collector query function and return the result."""
         if not self.is_connected:
@@ -147,11 +230,47 @@ class Bridge:
         }""", message)
 
     def wait_for_condition(self, js_expression: str, timeout: float = 30.0) -> object:
-        """Wait for a JS expression to return a truthy value."""
+        """Wait for a JS expression to return a truthy value, then return it."""
         if not self.is_connected:
             raise RuntimeError("No browser session.")
         self._page.wait_for_function(js_expression, timeout=timeout * 1000)
         return self._page.evaluate(js_expression)
+
+    def eval(self, js: str, *, await_promise: bool = False) -> object:
+        """Run an arbitrary JS expression in the page context.
+
+        If `js` is a bare expression, it is wrapped so its value is returned.
+        If `await_promise` is true, the expression's resolved promise value is
+        returned. Equivalent to Playwright's page.evaluate.
+        """
+        if not self.is_connected:
+            raise RuntimeError("No browser session.")
+        # Wrap the expression so users can pass either an expression
+        # ("document.title") or a function body ("() => document.title").
+        # Playwright accepts function-form strings directly; for bare
+        # expressions, wrap.
+        s = js.strip()
+        is_function = s.startswith("(") or s.startswith("function") or s.startswith("async ")
+        wrapped = js if is_function else f"() => ({js})"
+        if await_promise:
+            wrapped = (
+                js
+                if is_function
+                else f"async () => (await ({js}))"
+            )
+        return self._page.evaluate(wrapped)
+
+    def click(self, selector: str, timeout: float = 30.0) -> None:
+        """Click an element matched by `selector` (CSS or Playwright locator)."""
+        if not self.is_connected:
+            raise RuntimeError("No browser session.")
+        self._page.click(selector, timeout=timeout * 1000)
+
+    def fill(self, selector: str, text: str, timeout: float = 30.0) -> None:
+        """Type `text` into an input matched by `selector`."""
+        if not self.is_connected:
+            raise RuntimeError("No browser session.")
+        self._page.fill(selector, text, timeout=timeout * 1000)
 
     def get_browser_info(self) -> dict:
         """Get browser and GPU information."""
@@ -179,11 +298,20 @@ def get_bridge() -> Bridge:
     return _bridge
 
 
+# Friendly multi-line message used by `require_bridge`. Tests assert that the
+# string starts with "No active browser session" (substring match).
+NO_SESSION_MESSAGE = (
+    "No active browser session. Either:\n"
+    "  • Run 'webgpu-inspector-cli browser launch --url <URL>' first, then your follow-up command in the SAME process (use REPL).\n"
+    "  • Run 'webgpu-inspector-cli repl' for an interactive multi-step session.\n"
+    "  • Run 'webgpu-inspector-mcp' to start the MCP server (Claude Code, Claude Desktop, Cursor) — recommended for agent use.\n"
+    "Each bare CLI invocation starts a fresh process and a fresh browser, so 'browser launch' followed by a separate 'capture frame' will never share state."
+)
+
+
 def require_bridge() -> Bridge:
-    """Get the bridge, raising an error if no session is active."""
+    """Get the bridge, raising a friendly error if no session is active."""
     bridge = get_bridge()
     if not bridge.is_connected:
-        raise RuntimeError(
-            "No active browser session. Run 'browser launch --url <URL>' first."
-        )
+        raise RuntimeError(NO_SESSION_MESSAGE)
     return bridge

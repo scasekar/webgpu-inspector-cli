@@ -6,6 +6,7 @@ import time
 import click
 
 from webgpu_inspector_cli.core.bridge import require_bridge
+from webgpu_inspector_cli.utils import buffer_decoders
 
 
 @click.group()
@@ -166,32 +167,103 @@ def texture(ctx, tex_id, mip_level, output, timeout):
             click.echo(f"Texture #{tex_id} data received ({data.get('totalChunks', 0)} chunks)")
 
 
+_BUFFER_FORMATS = list(buffer_decoders.SUPPORTED_FORMATS)
+
+
 @capture.command()
 @click.option("--id", "buf_id", type=int, required=True, help="Buffer object ID.")
 @click.option("--offset", type=int, default=0, help="Byte offset into buffer.")
 @click.option("--size", "read_size", type=int, default=None, help="Number of bytes to read.")
-@click.option("--format", "fmt", type=click.Choice(["hex", "float32", "uint32", "raw"]),
-              default="hex", help="Display format.")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(_BUFFER_FORMATS, case_sensitive=False),
+    default="hex",
+    help=(
+        "Display format. 'hex' = compact hex string. 'hex-dump' = xxd-style "
+        "with offsets and ASCII gutter. 'u32-list' / 'i32-list' / 'f32-list' = "
+        "decoded little-endian array. 'f32-mat4' = 4x4 column-major matrix. "
+        "'raw' = base64. 'uint32'/'float32' are legacy aliases for u32-list/f32-list."
+    ),
+)
+@click.option(
+    "--struct",
+    "struct_spec",
+    type=str,
+    default=None,
+    help=(
+        "Decode buffer as repeating records of this struct shape. "
+        "Overrides --format. Example: "
+        "'mat4x4 anchorToWorld; u32 chunkIdDebug; pad12'. "
+        "Supports u8/i8/u16/i16/u32/i32/u64/i64/f32/f64/bool, "
+        "vec2/vec3/vec4 (f32), mat2x2/mat3x3/mat4x4 (f32, column-major), and padN."
+    ),
+)
+@click.option(
+    "--max-records",
+    type=int,
+    default=None,
+    help="With --struct, limit output to the first N records.",
+)
 @click.pass_context
-def buffer(ctx, buf_id, offset, read_size, fmt):
-    """Read buffer contents."""
+def buffer(ctx, buf_id, offset, read_size, fmt, struct_spec, max_records):
+    """Read buffer contents from the most recent captured frame.
+
+    Requires a prior 'capture frame'. Returns the buffer state from that frame
+    — buffer data is collected during frame capture (via mapAsync), not on
+    demand. If you don't see the buffer you expect, run 'capture frame' first.
+    """
     bridge = require_bridge()
     data = bridge.query("getBufferData", buf_id)
 
     if not data:
-        click.echo(f"No buffer data for #{buf_id}. Capture a frame first.", err=True)
+        click.echo(
+            f"No buffer data for #{buf_id}. Run 'capture frame' first — buffer "
+            "data is only populated during a frame capture, not on demand.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    raw_payload = data.get("data")
+    raw_offset = data.get("offset", 0)
+    raw_size = data.get("size", 0)
+
+    # Normalize and apply user-supplied offset/size window on top of whatever
+    # the inspector returned.
+    try:
+        all_bytes = buffer_decoders.to_bytes(raw_payload)
+    except ValueError as exc:
+        click.echo(f"Could not decode buffer payload: {exc}", err=True)
+        raise SystemExit(1)
+    sliced = buffer_decoders.slice_bytes(all_bytes, offset=offset, size=read_size)
+
+    try:
+        if struct_spec:
+            decoded = buffer_decoders.format_struct(
+                sliced, struct_spec, max_records=max_records
+            )
+        else:
+            decoded = buffer_decoders.dispatch_format(
+                sliced, fmt.lower(), base_offset=raw_offset + offset
+            )
+    except ValueError as exc:
+        click.echo(f"Decode error: {exc}", err=True)
         raise SystemExit(1)
 
     if ctx.obj.get("json"):
         click.echo(json.dumps({
             "bufferId": buf_id,
-            "offset": data.get("offset", 0),
-            "size": data.get("size", 0),
-            "data": data.get("data"),
+            "offset": raw_offset + offset,
+            "size": len(sliced),
+            "totalSize": raw_size,
+            "format": "struct" if struct_spec else fmt.lower(),
+            "structSpec": struct_spec,
+            "decoded": decoded,
         }, indent=2))
     else:
         click.echo(f"Buffer #{buf_id}:")
-        click.echo(f"  Offset: {data.get('offset', 0)}")
-        click.echo(f"  Size: {data.get('size', 0)} bytes")
-        if data.get("data"):
-            click.echo(f"  Data (first 256 chars): {str(data['data'])[:256]}")
+        click.echo(f"  Source offset: {raw_offset + offset}")
+        click.echo(f"  Window size:   {len(sliced)} bytes (of {raw_size} total)")
+        click.echo(f"  Format:        {'struct: ' + struct_spec if struct_spec else fmt.lower()}")
+        click.echo("")
+        click.echo(decoded)

@@ -1,8 +1,11 @@
-# WebGPU Inspector CLI
+# WebGPU Inspector CLI + MCP Server
 
-A command-line interface for the [WebGPU Inspector](https://github.com/brendan-duncan/webgpu_inspector), enabling AI agents and developers to debug WebGPU applications programmatically.
+Debug WebGPU applications programmatically. Two interfaces share the same Bridge:
 
-The CLI launches a browser, injects the WebGPU Inspector directly into any web page, and provides structured access to all GPU state — objects, shaders, textures, buffers, validation errors, frame captures, and performance metrics.
+- **`webgpu-inspector-mcp`** — MCP server. Long-lived process that any MCP-capable LLM client (Claude Code, Claude Desktop, Cursor) can drive. **Recommended for agent-driven use** because the browser session persists for the lifetime of the server.
+- **`webgpu-inspector-cli`** — terminal CLI + REPL. Each bare invocation is a fresh process, so for multi-step shell flows use the REPL (no subcommand) or use the MCP server.
+
+Both expose the same surface: launching Chromium with WebGPU, injecting the [WebGPU Inspector](https://github.com/brendan-duncan/webgpu_inspector), and providing structured access to GPU state — objects, shaders, textures, buffers, validation errors, frame captures, and performance metrics — plus page-driving primitives (`eval`, `click`, `type`, `wait`) and a buffer struct decoder.
 
 ## Installation
 
@@ -21,67 +24,176 @@ pip install -e .
 python -m playwright install chromium
 ```
 
-Verify the installation:
+This installs two executables: `webgpu-inspector-cli` (terminal) and `webgpu-inspector-mcp` (server).
 
+Verify:
 ```bash
 webgpu-inspector-cli --help
+webgpu-inspector-mcp --help     # rarely useful — clients invoke this directly
 ```
 
-## Quick Start
+## Lifecycle: each CLI invocation is independent
+
+Each `webgpu-inspector-cli ...` call starts a fresh Python process and a fresh browser, then exits. So this **does not work**:
 
 ```bash
-# Launch browser and start inspecting
-webgpu-inspector-cli browser launch --url https://your-webgpu-app.com
+webgpu-inspector-cli browser launch --url https://...
+webgpu-inspector-cli capture frame                # FAILS: browser is gone
+```
 
-# Check for validation errors
-webgpu-inspector-cli --json errors list
+Use one of:
+- **MCP server** — tools share state automatically
+- **REPL** — `webgpu-inspector-cli` (no subcommand)
+- **Custom Python** — `from webgpu_inspector_cli.core.bridge import get_bridge`
 
-# List all GPU objects
-webgpu-inspector-cli --json objects list
+## Configure the MCP server
 
-# View a shader's WGSL source
-webgpu-inspector-cli shaders view --id 8
+**Claude Code** — add to `~/.claude/mcp.json` or project `.mcp.json`:
 
-# Get a full status summary
-webgpu-inspector-cli --json status summary
+```json
+{
+  "mcpServers": {
+    "webgpu-inspector": {
+      "command": "webgpu-inspector-mcp"
+    }
+  }
+}
+```
 
-# Close the browser when done
-webgpu-inspector-cli browser close
+**Claude Desktop** — add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the platform equivalent:
+
+```json
+{
+  "mcpServers": {
+    "webgpu-inspector": {
+      "command": "webgpu-inspector-mcp"
+    }
+  }
+}
+```
+
+Restart the client. Tools appear as `browser_launch`, `browser_eval`, `capture_frame`, `capture_buffer`, etc.
+
+## Quick Start (REPL)
+
+```bash
+webgpu-inspector-cli                              # enter REPL
+> browser launch --url https://your-app.com --capture-console /tmp/console.log
+> browser wait --condition 'window._renderer !== undefined' --timeout 10
+> browser click 'button.load-scene'
+> --json errors list
+> --json objects list --type Buffer               # decoded usage flags
+> capture frame
+> capture buffer --id 42 --format f32-mat4
+> capture buffer --id 42 --struct 'mat4x4 m; u32 chunkId; pad12'
+> shaders compile --id 8 --file fixed.wgsl
+> browser close
+> exit
 ```
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Python CLI (Click)                                 │
-│  ┌───────────────────────────────────────────────┐  │
-│  │  Bridge (Playwright)                          │  │
-│  │  ┌─────────────────────────────────────────┐  │  │
-│  │  │  Chrome                                 │  │  │
-│  │  │  ┌──────────────┐  ┌─────────────────┐  │  │  │
-│  │  │  │ webgpu_      │  │ collector.js    │  │  │  │
-│  │  │  │ inspector.js │──│ (event listener │  │  │  │
-│  │  │  │ (injected)   │  │  + state store) │  │  │  │
-│  │  │  └──────────────┘  └─────────────────┘  │  │  │
-│  │  │         │                   ▲            │  │  │
-│  │  │         │ CustomEvent       │ query()    │  │  │
-│  │  │         ▼                   │            │  │  │
-│  │  │    __WebGPUInspector ───────┘            │  │  │
-│  │  └─────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  MCP server (webgpu-inspector-mcp)  +  CLI (Click)      │
+│       └────────────┬───────────────┘                    │
+│                    ▼                                    │
+│              Bridge (Playwright, singleton)             │
+│                    │                                    │
+│                    ▼                                    │
+│           ┌─────────────────────────────┐               │
+│           │  Chromium (WebGPU enabled)  │               │
+│           │  ┌──────────┐ ┌──────────┐  │               │
+│           │  │ inspector│ │collector │  │               │
+│           │  │ .js      │─│ .js      │  │               │
+│           │  └──────────┘ └──────────┘  │               │
+│           └─────────────────────────────┘               │
+└─────────────────────────────────────────────────────────┘
 ```
 
-1. **Playwright** launches Chrome with WebGPU enabled
-2. The built `webgpu_inspector.js` from the [submodule](https://github.com/brendan-duncan/webgpu_inspector) is injected into the page — the same code the Chrome DevTools extension uses
-3. A **collector.js** script listens for `__WebGPUInspector` CustomEvents and accumulates GPU state (objects, errors, memory, frame rate, captures)
-4. The Python CLI queries the collector via `page.evaluate()` and returns structured JSON
+1. **Playwright** launches Chromium with `--enable-unsafe-webgpu --enable-features=Vulkan`.
+2. The built `webgpu_inspector_loader.js` from the [submodule](https://github.com/brendan-duncan/webgpu_inspector) is injected — same code the Chrome DevTools extension uses.
+3. **collector.js** listens for `__WebGPUInspector` CustomEvents and accumulates GPU state.
+4. The **Bridge** queries the collector via `page.evaluate()` and returns structured data to either the CLI commands or the MCP tools.
 
-This gives you the same inspection capabilities as the DevTools panel, without needing the extension installed.
+The MCP server holds the Bridge for its full lifetime. The CLI binds the Bridge to a single Python process — so REPL is the multi-step CLI flow.
 
-## JSON Output
+## CLI / MCP command surface
 
-All commands support the `--json` flag for machine-readable output. Place it on the root command:
+Every CLI command has a 1:1 MCP tool counterpart. The MCP tool names are the underscore form (`browser_launch` ↔ `browser launch`).
+
+### `browser` — Session lifecycle + page driving
+
+| Command | Purpose |
+|---|---|
+| `browser launch --url URL` | Launch Chromium, navigate, inject inspector |
+| `browser launch --capture-console PATH` | Also: write all console messages to `PATH` (listener attached BEFORE navigation, so page-bootstrap logs are captured) |
+| `browser launch --user-data-dir PATH` | Use a persistent Chrome profile (cookies, localStorage, extensions) |
+| `browser launch --headless` | Headless (needs GPU or `--gpu-backend swiftshader`) |
+| `browser close` | Shut down the session |
+| `browser navigate --url URL` | Navigate + re-inject |
+| `browser screenshot -o PATH` | Save page screenshot |
+| `browser status` | URL, title, GPU availability |
+| `browser eval --js '<expr>'` | Run JS in page; returns the value |
+| `browser eval --file PATH` | Run a `.js` file |
+| `browser click '<selector>'` | Click DOM element (CSS or Playwright selector) |
+| `browser type '<selector>' '<text>'` | Type into input |
+| `browser wait --condition '<js>'` | Block until expression is truthy |
+
+### `objects` — GPU object inspection
+
+| Command | Purpose |
+|---|---|
+| `objects list [--type TYPE]` | List GPU objects. `--type Buffer` includes a decoded **usage flags** column (Storage / Indirect / CopyDst / etc.) |
+| `objects inspect --id ID` | Full descriptor + creation stacktrace |
+| `objects search --label PATTERN` | Find by label substring |
+| `objects memory` | Texture + buffer totals |
+
+Object types: Adapter, Device, Buffer, Texture, TextureView, Sampler, ShaderModule, BindGroup, BindGroupLayout, PipelineLayout, RenderPipeline, ComputePipeline, RenderBundle.
+
+### `capture` — Frame capture & data inspection
+
+| Command | Purpose |
+|---|---|
+| `capture frame` | Capture next frame's GPU commands |
+| `capture commands [--pass-index N]` | List captured GPU commands |
+| `capture texture --id ID [-o PATH]` | Read texture pixels, optionally save as PNG |
+| `capture buffer --id ID [--format FMT]` | **Requires a prior `capture frame`.** Read buffer data from the captured frame. |
+| `capture buffer --id ID --struct '<spec>'` | Decode buffer as repeated records |
+
+**Buffer formats:** `hex` (default), `hex-dump` (xxd-style), `u32-list`, `i32-list`, `f32-list`, `f32-mat4`, `raw` (base64).
+
+**Struct spec:** `'mat4x4 anchorToWorld; u32 chunkIdDebug; pad12; vec3 origin; f32 scale'`. Supports `u8/i8/u16/i16/u32/i32/u64/i64/f32/f64/bool`, `vec2/vec3/vec4` (f32), `mat2x2/mat3x3/mat4x4` (f32, column-major), `padN`.
+
+### `shaders` — Inspection & hot-reload
+
+| Command | Purpose |
+|---|---|
+| `shaders list` | List shader modules with size |
+| `shaders view --id ID` | Display WGSL source |
+| `shaders compile --id ID --file PATH` | Hot-replace shader code from a file |
+| `shaders compile --id ID --code "..."` | Hot-replace from a string |
+| `shaders revert --id ID` | Revert to original |
+
+### `errors` — Validation errors
+
+| Command | Purpose |
+|---|---|
+| `errors list` | All errors with messages and stacktraces |
+| `errors watch [--timeout N]` | Stream new errors in real time (CLI only) |
+| `errors clear` | Reset history |
+
+### `status` — Runtime monitoring
+
+| Command | Purpose |
+|---|---|
+| `status summary` | Object counts, FPS, memory, error count |
+| `status fps` | Current frame rate |
+| `status memory` | GPU memory breakdown |
+
+## JSON output (CLI)
+
+All commands support `--json`:
 
 ```bash
 webgpu-inspector-cli --json objects list
@@ -89,232 +201,87 @@ webgpu-inspector-cli --json status summary
 webgpu-inspector-cli --json errors list
 ```
 
-Example output from `--json objects list`:
-
-```json
-{
-  "objects": [
-    {
-      "id": 8,
-      "type": "ShaderModule",
-      "label": null,
-      "descriptor": { "code": "@vertex\nfn vertexMain..." },
-      "stacktrace": "main (app.js:33:36)",
-      "parent": 2,
-      "pending": false,
-      "size": 411
-    }
-  ],
-  "count": 1
-}
-```
-
-## REPL Mode
-
-Running the CLI without a subcommand enters an interactive REPL with command history:
-
-```bash
-webgpu-inspector-cli
-```
-
-## Command Reference
-
-### `browser` — Session Lifecycle
-
-| Command | Description |
-|---------|-------------|
-| `browser launch --url URL` | Launch Chrome, navigate to URL, inject inspector |
-| `browser close` | Shut down the browser session |
-| `browser navigate --url URL` | Navigate to a new URL and re-inject |
-| `browser screenshot -o PATH` | Take a screenshot of the current page |
-| `browser status` | Show browser URL, title, and GPU availability |
-
-**Options for `browser launch`:**
-
-| Flag | Description |
-|------|-------------|
-| `--url URL` | URL to navigate to (required) |
-| `--headless` | Run in headless mode (needs GPU or `--gpu-backend swiftshader`) |
-| `--gpu-backend TEXT` | GPU backend override (e.g., `swiftshader` for software rendering) |
-
-### `objects` — GPU Object Inspection
-
-| Command | Description |
-|---------|-------------|
-| `objects list [--type TYPE]` | List all live GPU objects, optionally filtered by type |
-| `objects inspect --id ID` | Full details: descriptor, creation stacktrace, parent, size |
-| `objects search --label PATTERN` | Find objects by label substring (case-insensitive) |
-| `objects memory` | GPU memory breakdown (texture + buffer totals) |
-
-**Supported object types for `--type`:**
-Adapter, Device, Buffer, Texture, TextureView, Sampler, ShaderModule, BindGroup, BindGroupLayout, PipelineLayout, RenderPipeline, ComputePipeline, RenderBundle
-
-### `capture` — Frame Capture & Data Inspection
-
-| Command | Description |
-|---------|-------------|
-| `capture frame` | Capture the next frame's GPU commands |
-| `capture commands [--pass-index N]` | List GPU commands from the captured frame |
-| `capture texture --id ID [-o PATH]` | Read texture pixel data, optionally save as PNG |
-| `capture buffer --id ID` | Read buffer contents |
-
-**Options for `capture frame`:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--timeout FLOAT` | 30.0 | Seconds to wait for capture to complete |
-| `--poll-interval FLOAT` | 0.5 | Seconds between status polls |
-
-**Options for `capture texture`:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--id INTEGER` | — | Texture object ID (required) |
-| `--mip-level INTEGER` | 0 | Mip level to capture |
-| `-o, --output PATH` | — | Save as PNG (or raw bytes if not .png) |
-| `--timeout FLOAT` | 30.0 | Seconds to wait for data |
-
-**Options for `capture buffer`:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--id INTEGER` | — | Buffer object ID (required) |
-| `--offset INTEGER` | 0 | Byte offset into buffer |
-| `--size INTEGER` | — | Number of bytes to read |
-| `--format` | hex | Display format: `hex`, `float32`, `uint32`, `raw` |
-
-### `shaders` — Shader Inspection & Hot-Reload
-
-| Command | Description |
-|---------|-------------|
-| `shaders list` | List all shader modules with size |
-| `shaders view --id ID` | Display full WGSL source code |
-| `shaders compile --id ID --file PATH` | Hot-replace shader code from a file |
-| `shaders compile --id ID --code "..."` | Hot-replace shader code from a string |
-| `shaders revert --id ID` | Revert shader to its original code |
-
-Shader edits support undo — the original code is saved before each compile so `revert` can restore it.
-
-### `errors` — Validation Error Tracking
-
-| Command | Description |
-|---------|-------------|
-| `errors list` | List all validation errors with messages and stacktraces |
-| `errors watch [--timeout N]` | Poll for new errors in real-time (default 30s) |
-| `errors clear` | Clear the error history |
-
-**Options for `errors watch`:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--timeout FLOAT` | 30.0 | Seconds to watch |
-| `--poll-interval FLOAT` | 1.0 | Seconds between polls |
-
-### `status` — Runtime Monitoring
-
-| Command | Description |
-|---------|-------------|
-| `status summary` | Object counts by type, memory, FPS, error count |
-| `status fps` | Current frame rate and frame time |
-| `status memory` | GPU memory breakdown (texture + buffer) |
+MCP tools return JSON natively — no flag needed.
 
 ## Debugging Workflows
 
-### Diagnosing Validation Errors
-
-```bash
-webgpu-inspector-cli browser launch --url http://localhost:8080
-webgpu-inspector-cli --json errors list
-```
-
-Each error includes the validation message and the creation stacktrace pinpointing the offending API call.
-
-### Investigating Missing or Incorrect Rendering
-
-```bash
-# What GPU objects exist?
-webgpu-inspector-cli --json objects list
-
-# Is the expected pipeline there?
-webgpu-inspector-cli --json objects list --type RenderPipeline
-
-# Inspect its descriptor (vertex/fragment config, blend state, etc.)
-webgpu-inspector-cli --json objects inspect --id 9
-
-# Look at the shader it uses
-webgpu-inspector-cli shaders view --id 8
-```
-
-### Shader Debugging with Hot-Reload
-
-```bash
-# View current shader
-webgpu-inspector-cli shaders view --id 8
-
-# Edit locally, then hot-reload
-webgpu-inspector-cli shaders compile --id 8 --file fixed_shader.wgsl
-
-# Didn't work? Revert
-webgpu-inspector-cli shaders revert --id 8
-```
-
-### Inspecting Render Targets
-
-```bash
-# Capture a frame
-webgpu-inspector-cli --json capture frame
-
-# List all textures
-webgpu-inspector-cli --json objects list --type Texture
-
-# Save a render target as PNG for visual inspection
-webgpu-inspector-cli capture texture --id 6 -o render_target.png
-```
-
-### Performance Profiling
-
-```bash
-webgpu-inspector-cli --json status summary
-webgpu-inspector-cli status fps
-webgpu-inspector-cli --json status memory
-webgpu-inspector-cli --json objects list --type Buffer   # find large buffers
-webgpu-inspector-cli --json objects list --type Texture  # find large textures
-```
-
-## Claude Code Plugin
-
-A [Claude Code plugin](https://github.com/scasekar/webgpu-inspector-plugin) is available that adds a `/webgpu-inspect` command, a `webgpu-inspector` skill, and a `webgpu-debugger` agent to Claude Code:
+### Diagnosing validation errors
 
 ```
-/plugin marketplace add scasekar/webgpu-inspector-plugin
-/plugin install webgpu-inspector
-/reload-plugins
+errors_list()                                # MCP
+> --json errors list                         # CLI REPL
+```
+
+Each error includes the validation message + creation stacktrace pinpointing the offending API call.
+
+### Driving an app that needs interaction past initial load
+
+Use the page-driving primitives instead of adding `?autoload=1` URL params to your app:
+
+```
+browser_launch(url=...)
+browser_wait(condition="window.app && window.app.ready")
+browser_eval(js="window.app.loadScene('demo')")
+browser_click(selector="button.start")
+```
+
+### Inspecting buffer contents
+
+Frame capture must run first — buffer data is populated via `mapAsync` during capture, not on demand.
+
+```
+capture_frame()
+capture_buffer(id=42, format="f32-mat4")                     # 4×4 matrices
+capture_buffer(id=42, struct_spec="u32 chunkId; vec3 pos")   # decoded records
+```
+
+### Hot-reloading shaders
+
+```
+shaders_view(id=8)                                   # read current
+shaders_replace(id=8, code="<new WGSL>")             # try a fix
+shaders_revert(id=8)                                 # rollback
+```
+
+### Inspecting render targets
+
+```
+capture_frame()
+capture_texture(id=6, output_path="rt.png")
 ```
 
 ## Project Structure
 
 ```
 webgpu-inspector-cli/
-├── webgpu_inspector/              # Git submodule (WebGPU Inspector source)
+├── webgpu_inspector/                    # Git submodule (WebGPU Inspector source)
 ├── agent-harness/
-│   ├── setup.py                   # Package config
+│   ├── setup.py                         # Package config (CLI + MCP entry points)
 │   └── webgpu_inspector_cli/
-│       ├── webgpu_inspector_cli.py   # CLI entry point
+│       ├── webgpu_inspector_cli.py      # CLI entry point (Click)
 │       ├── core/
-│       │   ├── bridge.py      # Playwright CDP bridge
-│       │   └── session.py     # Shader edit undo/redo
-│       ├── commands/          # Click command groups
-│       │   ├── browser.py
+│       │   ├── bridge.py                # Playwright bridge (singleton)
+│       │   └── session.py               # Shader edit undo/redo
+│       ├── commands/                    # Click command groups
+│       │   ├── browser.py               # incl. eval/click/type/wait
 │       │   ├── objects.py
-│       │   ├── capture.py
+│       │   ├── capture.py               # incl. struct decoder
 │       │   ├── shaders.py
 │       │   ├── errors.py
 │       │   └── status.py
+│       ├── mcp_server/                  # MCP server
+│       │   ├── server.py                # Tool definitions
+│       │   └── __main__.py
+│       ├── utils/
+│       │   ├── buffer_decoders.py       # Format decoders + struct spec parser
+│       │   └── repl_skin.py             # REPL UI
 │       ├── js/
-│       │   └── collector.js   # Injected event collector
+│       │   └── collector.js             # Injected event collector
 │       └── tests/
-│           ├── test_core.py       # 19 unit tests
-│           └── test_full_e2e.py   # 16 E2E tests
+│           ├── test_core.py
+│           ├── test_buffer_decoders.py
+│           ├── test_mcp_server.py
+│           └── test_full_e2e.py
 └── examples/
 ```
 
@@ -325,12 +292,21 @@ cd agent-harness
 
 # Unit tests (fast, no browser)
 pytest webgpu_inspector_cli/tests/test_core.py -v
+pytest webgpu_inspector_cli/tests/test_buffer_decoders.py -v
+pytest webgpu_inspector_cli/tests/test_mcp_server.py -v
 
-# E2E tests (launches real browser with test pages)
+# E2E tests (real browser, requires GPU or --gpu-backend swiftshader)
 pytest webgpu_inspector_cli/tests/test_full_e2e.py -v -s
+```
 
-# All tests
-pytest webgpu_inspector_cli/tests/ -v -s
+## Claude Code Plugin
+
+A [Claude Code plugin](https://github.com/scasekar/webgpu-inspector-plugin) packages this with a skill, slash command, and subagent:
+
+```
+/plugin marketplace add scasekar/webgpu-inspector-plugin
+/plugin install webgpu-inspector
+/reload-plugins
 ```
 
 ## License
@@ -340,4 +316,4 @@ MIT
 ## Credits
 
 - [WebGPU Inspector](https://github.com/brendan-duncan/webgpu_inspector) by Brendan Duncan
-- Built with the [CLI-Anything](https://github.com/HKUDS/CLI-Anything) methodology
+- Built on [Playwright](https://playwright.dev/) and the [Model Context Protocol](https://modelcontextprotocol.io/)

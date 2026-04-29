@@ -4,6 +4,7 @@ import json
 import click
 
 from webgpu_inspector_cli.core.bridge import require_bridge
+from webgpu_inspector_cli.utils.buffer_decoders import decode_buffer_usage
 
 GPU_TYPES = [
     "Adapter", "Device", "Buffer", "Texture", "TextureView", "Sampler",
@@ -22,6 +23,20 @@ def _format_bytes(n):
     return f"{n:.1f} TB"
 
 
+def _extract_buffer_usage(obj: dict) -> int | None:
+    """Pull the GPUBufferUsage bitmask off a buffer object record."""
+    desc = obj.get("descriptor") or {}
+    if isinstance(desc, dict):
+        usage = desc.get("usage")
+        if isinstance(usage, int):
+            return usage
+    # Some collector paths surface usage at the top level.
+    top = obj.get("usage")
+    if isinstance(top, int):
+        return top
+    return None
+
+
 @click.group()
 def objects():
     """GPU object inspection."""
@@ -33,27 +48,57 @@ def objects():
               default=None, help="Filter by object type.")
 @click.pass_context
 def list_objects(ctx, obj_type):
-    """List all live GPU objects."""
+    """List all live GPU objects.
+
+    For Buffers, decoded GPUBufferUsage flags (Storage, Indirect, CopyDst, etc.)
+    are shown so you can quickly spot indirect-draw sources, uniform buffers,
+    and writable storage targets.
+    """
     bridge = require_bridge()
     result = bridge.query("getObjects", obj_type)
 
+    is_buffer_view = obj_type and obj_type.lower() == "buffer"
+
     if ctx.obj.get("json"):
+        # Enrich buffer entries with decoded usage flags.
+        if is_buffer_view or any((o.get("type") == "Buffer") for o in result):
+            for o in result:
+                if o.get("type") == "Buffer":
+                    bits = _extract_buffer_usage(o)
+                    if bits is not None:
+                        o["usageFlags"] = decode_buffer_usage(bits)
         click.echo(json.dumps({"objects": result, "count": len(result)}, indent=2))
-    else:
-        if not result:
-            click.echo("No GPU objects found.")
-            return
-        click.echo(f"{'ID':>6}  {'Type':<20}  {'Label':<30}  {'Size':>12}")
-        click.echo("-" * 72)
+        return
+
+    if not result:
+        click.echo("No GPU objects found.")
+        return
+
+    if is_buffer_view:
+        # Wider table that includes usage flags. Truncated to fit common terminals.
+        click.echo(f"{'ID':>6}  {'Label':<24}  {'Size':>10}  {'Usage'}")
+        click.echo("-" * 78)
         for obj in result:
-            size_str = ""
-            if obj.get("size"):
-                size_str = _format_bytes(obj["size"])
-            elif obj.get("gpuSize"):
-                size_str = _format_bytes(obj["gpuSize"])
-            label = obj.get("label") or ""
-            click.echo(f"{obj['id']:>6}  {obj['type']:<20}  {label:<30}  {size_str:>12}")
-        click.echo(f"\nTotal: {len(result)} objects")
+            size_str = _format_bytes(obj.get("size") or obj.get("gpuSize") or 0)
+            label = (obj.get("label") or "")[:24]
+            bits = _extract_buffer_usage(obj)
+            flags = decode_buffer_usage(bits) if bits is not None else []
+            flags_str = " | ".join(flags) if flags else "-"
+            click.echo(f"{obj['id']:>6}  {label:<24}  {size_str:>10}  {flags_str}")
+        click.echo(f"\nTotal: {len(result)} buffers")
+        return
+
+    click.echo(f"{'ID':>6}  {'Type':<20}  {'Label':<30}  {'Size':>12}")
+    click.echo("-" * 72)
+    for obj in result:
+        size_str = ""
+        if obj.get("size"):
+            size_str = _format_bytes(obj["size"])
+        elif obj.get("gpuSize"):
+            size_str = _format_bytes(obj["gpuSize"])
+        label = obj.get("label") or ""
+        click.echo(f"{obj['id']:>6}  {obj['type']:<20}  {label:<30}  {size_str:>12}")
+    click.echo(f"\nTotal: {len(result)} objects")
 
 
 @objects.command()
@@ -69,6 +114,10 @@ def inspect(ctx, obj_id):
         raise SystemExit(1)
 
     if ctx.obj.get("json"):
+        if obj.get("type") == "Buffer":
+            bits = _extract_buffer_usage(obj)
+            if bits is not None:
+                obj["usageFlags"] = decode_buffer_usage(bits)
         click.echo(json.dumps(obj, indent=2))
     else:
         click.echo(f"Object #{obj['id']} ({obj['type']})")
@@ -82,6 +131,11 @@ def inspect(ctx, obj_id):
             click.echo(f"  Size: {_format_bytes(obj['size'])}")
         if obj.get("gpuSize"):
             click.echo(f"  GPU Memory: {_format_bytes(obj['gpuSize'])}")
+        if obj.get("type") == "Buffer":
+            bits = _extract_buffer_usage(obj)
+            if bits is not None:
+                flags = decode_buffer_usage(bits)
+                click.echo(f"  Usage: {' | '.join(flags) if flags else '-'} (0x{bits:04x})")
         if obj.get("descriptor"):
             click.echo("  Descriptor:")
             desc_str = json.dumps(obj["descriptor"], indent=4)
