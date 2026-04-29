@@ -83,6 +83,32 @@ class TestBridgePaths:
             require_bridge()
         bridge_mod._bridge = None
 
+    def test_loader_bootstrap_sets_session_storage_flag(self):
+        """Regression for v0.2.3: the loader bootstrap MUST set
+        WEBGPU_INSPECTOR_LOADED='true' before injecting the loader. Without
+        this, the loader's auto-init is skipped (it just registers a
+        start_inspection event listener) and the inspector's prototype hooks
+        never install in time to catch emscripten's first GPUQueue.submit."""
+        from webgpu_inspector_cli.core.bridge import Bridge
+        bs = Bridge()._build_loader_bootstrap()
+        assert "WEBGPU_INSPECTOR_LOADED" in bs
+        assert "'true'" in bs
+
+    def test_loader_bootstrap_defers_until_documentElement(self):
+        """Regression for v0.2.3: the loader bootstrap MUST wait for
+        document.documentElement before injecting the loader. Playwright's
+        add_init_script runs BEFORE <html> is parsed, so an immediate loader
+        execution crashes inside `MutationObserver.observe(null, ...)`.
+        Yielding via setTimeout(0) (NOT queueMicrotask, which would starve
+        the parser) gives the parser a chance to create documentElement."""
+        from webgpu_inspector_cli.core.bridge import Bridge
+        bs = Bridge()._build_loader_bootstrap()
+        assert "documentElement" in bs
+        # Must yield to the parser via setTimeout, not queueMicrotask (which
+        # would starve the parser and produce an infinite loop).
+        assert "setTimeout" in bs
+        assert "queueMicrotask" not in bs
+
 
 # --- Format Helpers Tests ---
 

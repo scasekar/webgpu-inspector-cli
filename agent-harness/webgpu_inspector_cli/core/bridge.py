@@ -85,14 +85,29 @@ class Bridge:
                 args=args,
             )
             self._browser = None  # No separate Browser object in this mode.
-            # launch_persistent_context starts with one default page.
-            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         else:
             self._browser = self._playwright.chromium.launch(
                 headless=headless,
                 args=args,
             )
             self._context = self._browser.new_context()
+
+        # Install the inspector loader BEFORE creating the page and navigating.
+        # This is critical for emscripten/WASM apps (e.g. anything built with
+        # `-s PROXY_TO_PTHREAD=1`): emdawnwebgpu issues its first
+        # GPUQueue.submit during WASM bootstrap, so the prototype hooks have
+        # to be in place before any page script runs. Using post-goto
+        # `page.evaluate(loader_js)` (the previous approach) misses every
+        # submit emscripten makes during init, leaving capture_frame visible
+        # only to React-side render code. add_init_script must be registered
+        # on the context BEFORE new_page() so the init script fires on the
+        # page's first navigation.
+        self._context.add_init_script(self._build_loader_bootstrap())
+
+        if user_data_dir:
+            # launch_persistent_context starts with one default page.
+            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        else:
             self._page = self._context.new_page()
 
         # Attach console capture BEFORE navigation so page-bootstrap logs are recorded.
@@ -107,6 +122,8 @@ class Bridge:
         if not self.is_connected:
             raise RuntimeError("No browser session. Call launch() first.")
         self._inspector_injected = False
+        # The loader bootstrap is registered on the context (via launch), so
+        # navigation re-fires it automatically — no need to re-install here.
         self._page.goto(url, wait_until="domcontentloaded")
         self._inject()
 
@@ -147,20 +164,69 @@ class Bridge:
         self._page.screenshot(path=output_path, full_page=full_page)
         return output_path
 
+    def _build_loader_bootstrap(self) -> str:
+        """Build the init-script that installs the inspector loader at the right
+        moment during page load.
+
+        Two things matter:
+
+        1. The loader's auto-init is gated by `sessionStorage[WEBGPU_INSPECTOR_LOADED]`
+           (matches the chrome extension's content_script.js:131 activation
+           pattern). Without this flag set, the loader just registers a
+           `webgpu_inspector_start_inspection` listener and waits — by the
+           time we'd dispatch that event, emscripten has already issued
+           submits without prototype hooks in place.
+
+        2. The loader's MutationObserver init crashes if `document.body` AND
+           `document.documentElement` are both null. Playwright's
+           `add_init_script` runs BEFORE `<html>` is parsed, so we have to
+           defer the loader's actual execution until `documentElement` exists.
+           We yield via `setTimeout(0)` (NOT queueMicrotask, which would
+           starve the parser) and inject the loader via a `<script>` tag
+           when ready. This mirrors the timing the chrome extension's
+           content_script gets natively for free.
+        """
+        loader_js = _find_inspector_js().read_text()
+        return (
+            "(() => {"
+            "sessionStorage.setItem('WEBGPU_INSPECTOR_LOADED', 'true');"
+            "function __wgi_load(){"
+            "  if (!document || !document.documentElement) {"
+            "    return setTimeout(__wgi_load, 0);"
+            "  }"
+            "  try {"
+            "    const s = document.createElement('script');"
+            "    s.textContent = " + json.dumps(loader_js) + ";"
+            "    (document.head || document.documentElement).appendChild(s);"
+            "    s.remove();"
+            "  } catch (e) {"
+            "    console.error('[webgpu-inspector-cli] loader bootstrap error', e);"
+            "    throw e;"
+            "  }"
+            "}"
+            "__wgi_load();"
+            "})();"
+        )
+
     def _inject(self):
-        """Inject the inspector and collector scripts into the page."""
+        """Inject the page-side collector after navigation.
+
+        The inspector loader itself is now installed via `add_init_script` in
+        `launch()` — that has to happen before any page script. Here we just
+        attach the collector that exposes `window.__wgi.*` query helpers, and
+        idempotently dispatch the start-inspection event in case the loader
+        is running in fallback mode (sessionStorage flag missing).
+        """
         if self._inspector_injected:
             return
 
-        # 1. Inject the built webgpu_inspector_loader.js
-        loader_js = _find_inspector_js().read_text()
-        self._page.evaluate(loader_js)
-
-        # 2. Inject our collector.js
+        # 1. Inject our collector.js (post-load is fine — it just listens).
         collector_js = _find_collector_js().read_text()
         self._page.evaluate(collector_js)
 
-        # 3. Dispatch the start_inspection event to activate the inspector
+        # 2. Dispatch the start_inspection event. No-op when the loader has
+        # already auto-activated via sessionStorage flag (the typical case
+        # after the bootstrap), but useful as a safety net.
         self._page.evaluate("""() => {
             window.dispatchEvent(new CustomEvent("__WebGPUInspector", {
                 detail: {

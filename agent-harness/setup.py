@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="webgpu-inspector-cli",
-    version="0.2.2",
+    version="0.2.3",
     description="CLI + MCP server for WebGPU Inspector — debug WebGPU applications from the command line or any MCP-capable LLM client",
     author="Arvind Sekar",
     python_requires=">=3.10",
