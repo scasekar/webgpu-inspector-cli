@@ -133,8 +133,28 @@ class TestCollectorJS:
         for fn in ["getObjects", "getObject", "getErrors", "getFrameRate",
                     "getMemoryUsage", "getSummary", "requestCapture",
                     "getCaptureStatus", "getShaderCode", "compileShader",
-                    "revertShader"]:
+                    "revertShader", "getCapturedBufferStatus"]:
             assert fn in content, f"Missing query function: {fn}"
+
+    def test_collector_writes_capture_session_storage(self):
+        """The capture-frame fix: collector must write WEBGPU_INSPECTOR_CAPTURE_FRAME
+        sessionStorage so the main-thread inspector picks it up at the next rAF
+        (webgpu_inspector.js:1382 polls this every frame)."""
+        from webgpu_inspector_cli.core.bridge import _find_collector_js
+        content = _find_collector_js().read_text()
+        assert "WEBGPU_INSPECTOR_CAPTURE_FRAME" in content, (
+            "Collector must write the capture key to sessionStorage "
+            "so main-thread captures actually start"
+        )
+
+    def test_collector_resolves_buffer_data_by_bind_group(self):
+        """Buffer data arrives keyed by (commandId, entryIndex). The collector
+        must walk captured commands' setBindGroup args to resolve back to a
+        buffer id."""
+        from webgpu_inspector_cli.core.bridge import _find_collector_js
+        content = _find_collector_js().read_text()
+        for marker in ["capturedBufferChunks", "capturedAllCommands", "setBindGroup"]:
+            assert marker in content, f"Missing collector marker: {marker}"
 
 
 # --- CLI Entry Point Tests ---

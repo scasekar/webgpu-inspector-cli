@@ -50,7 +50,16 @@
   let capturedFrameResults = null;
   let capturedCommands = null;
   let capturedTextures = new Map(); // id -> { chunks: [], totalChunks, assembled }
-  let capturedBuffers = new Map();  // id -> { data }
+
+  // Buffer captures arrive keyed by (commandId, entryIndex) — NOT by buffer
+  // id. Reason: the inspector queues `__captureBuffers.push({commandId,
+  // entryIndex, buffer, offset, size})` inside setBindGroup interception
+  // (webgpu_inspector.js:1798), then later sends CaptureBufferData messages
+  // with only {commandId, entryIndex, chunk, ...}. To translate that back
+  // into a buffer id, we walk the captured commands stream and look up the
+  // BindGroup descriptor referenced by the matching setBindGroup command.
+  let capturedBufferChunks = new Map(); // "cmdId:entryIdx" -> { chunks[], totalChunks, size, offset, complete }
+  let capturedAllCommands = [];        // flat list of every captured command, for buffer-id lookup
 
   // --- Texture memory calculation ---
   const FORMAT_SIZES = {
@@ -209,6 +218,11 @@
 
       case Actions.CaptureFrameCommands: {
         capturedCommands = detail;
+        // Accumulate every command across batches so getBufferData can resolve
+        // (commandId, entryIndex) → bufferId regardless of which batch the
+        // setBindGroup arrived in.
+        const cmdList = Array.isArray(detail.commands) ? detail.commands : [];
+        for (const c of cmdList) capturedAllCommands.push(c);
         break;
       }
 
@@ -236,12 +250,33 @@
       }
 
       case Actions.CaptureBufferData: {
-        const bufId = detail.id;
-        capturedBuffers.set(bufId, {
-          data: detail.data,
-          offset: detail.offset || 0,
-          size: detail.size || 0,
-        });
+        // Inspector emits this message per chunk with the wire shape
+        // {commandId, entryIndex, offset, size, index, count, chunk}.
+        // (webgpu_inspector.js:_sendBufferData line 2050.) `chunk` is a
+        // base64 data URL; `offset` is the chunk-within-buffer byte offset
+        // (NOT the entry's bind offset); `size` is the total bytes for this
+        // (commandId, entryIndex) pairing.
+        const cmdId = detail.commandId;
+        const entryIdx = detail.entryIndex;
+        if (cmdId === undefined || entryIdx === undefined) break;
+        const key = `${cmdId}:${entryIdx}`;
+        let entry = capturedBufferChunks.get(key);
+        if (!entry) {
+          entry = {
+            chunks: [],
+            totalChunks: detail.count || 1,
+            size: detail.size || 0,
+            complete: false,
+          };
+          capturedBufferChunks.set(key, entry);
+        }
+        // index is the chunk's ordinal within (commandId, entryIndex).
+        entry.chunks[detail.index ?? 0] = detail.chunk;
+        entry.totalChunks = detail.count ?? entry.totalChunks;
+        const received = entry.chunks.filter(c => c !== undefined).length;
+        if (received >= entry.totalChunks && entry.totalChunks > 0) {
+          entry.complete = true;
+        }
         break;
       }
     }
@@ -349,14 +384,40 @@
       capturedFrameResults = null;
       capturedCommands = null;
       capturedTextures = new Map();
-      capturedBuffers = new Map();
+      capturedBufferChunks = new Map();
+      capturedAllCommands = [];
 
-      const data = options || {};
+      // Capture config consumed by the inspector. `frame: -1` = capture
+      // immediately (next rAF). `captureFrameCount: 1` = single-frame capture.
+      // The maxBufferSize default (-1) means "no truncation".
+      const data = Object.assign(
+        { frame: -1, captureFrameCount: 1, maxBufferSize: -1 },
+        options || {}
+      );
+      const dataString = JSON.stringify(data);
+
+      // Main-thread inspector path: sessionStorage is polled at the start of
+      // every rAF cycle (webgpu_inspector.js:1382). Without this, dispatching
+      // the Capture event has no effect on a main-thread inspector — the
+      // event handler at line 303 only sets `_captureData` when running in a
+      // worker (`_window == null`). The DevTools extension's content script
+      // does both this set + the event dispatch (extension/content_script.js:122).
+      try {
+        window.sessionStorage.setItem(
+          "WEBGPU_INSPECTOR_CAPTURE_FRAME", dataString
+        );
+      } catch (e) {
+        // sessionStorage can be blocked in some embedded contexts; the event
+        // dispatch is still useful for the worker path.
+      }
+
+      // Worker-thread inspector path: a dispatched event is the only way
+      // capture config reaches a worker's inspector instance.
       window.dispatchEvent(new CustomEvent("__WebGPUInspector", {
         detail: {
           __webgpuInspector: true,
           action: "webgpu_inspector_capture",
-          data: JSON.stringify(data),
+          data: dataString,
         }
       }));
       return true;
@@ -372,6 +433,26 @@
 
     getCapturedCommands() {
       return capturedCommands;
+    },
+
+    // Diagnostic: report what (commandId, entryIndex) buffer chunks are ready.
+    // Useful when buffer data hasn't shown up — buffer reads are async via
+    // mapAsync, so they can lag the CaptureFrameResults arrival by several
+    // hundred ms.
+    getCapturedBufferStatus() {
+      const out = [];
+      for (const [key, entry] of capturedBufferChunks.entries()) {
+        const [cmdId, entryIdx] = key.split(":").map(Number);
+        out.push({
+          commandId: cmdId,
+          entryIndex: entryIdx,
+          size: entry.size,
+          totalChunks: entry.totalChunks,
+          receivedChunks: entry.chunks.filter(c => c !== undefined).length,
+          complete: entry.complete,
+        });
+      }
+      return { entries: out, count: out.length, totalCommands: capturedAllCommands.length };
     },
 
     requestTexture(id, mipLevel) {
@@ -398,7 +479,64 @@
     },
 
     getBufferData(id) {
-      return capturedBuffers.get(id) || null;
+      // Resolve a buffer id to its captured contents by walking the captured
+      // command stream:
+      //   1. Find every setBindGroup command. args[1].__id is the BindGroup id.
+      //   2. Look up that BindGroup's descriptor.entries — find which entry
+      //      has resource.buffer.__id === id. That gives us entryIndex.
+      //   3. Look up capturedBufferChunks under (commandId, entryIndex).
+      //   4. Decode each chunk's data URL, concatenate bytes, return as a
+      //      base64 string the Python decoder already understands.
+      // Returns the most recent matching capture (last setBindGroup wins).
+      let match = null;
+      for (const cmd of capturedAllCommands) {
+        if (!cmd || cmd.method !== "setBindGroup") continue;
+        const args = cmd.args || [];
+        const bgRef = args[1];
+        const bgId = bgRef && bgRef.__id;
+        if (!bgId) continue;
+        const bgObj = objects.get(bgId);
+        const entries = bgObj && bgObj.descriptor && bgObj.descriptor.entries;
+        if (!Array.isArray(entries)) continue;
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i];
+          const bufRef = e && e.resource && e.resource.buffer;
+          const bufId = bufRef && bufRef.__id;
+          if (bufId !== id) continue;
+          const key = `${cmd.commandId}:${i}`;
+          const chunks = capturedBufferChunks.get(key);
+          if (chunks && chunks.complete) {
+            match = { cmd, entryIndex: i, chunks };
+          }
+        }
+      }
+      if (!match) return null;
+
+      // Reassemble: each chunk is "data:application/octet-stream;base64,XXX".
+      // Decode each chunk into Uint8Array and concatenate.
+      const out = new Uint8Array(match.chunks.size);
+      let cursor = 0;
+      for (let idx = 0; idx < match.chunks.totalChunks; idx++) {
+        const url = match.chunks.chunks[idx];
+        if (!url) return null; // gap → bail
+        const comma = url.indexOf(",");
+        const b64 = comma >= 0 ? url.substring(comma + 1) : url;
+        const bin = atob(b64);
+        for (let j = 0; j < bin.length; j++) out[cursor + j] = bin.charCodeAt(j);
+        cursor += bin.length;
+      }
+      // Re-encode to base64 string (browser-side btoa with binary string).
+      let bstr = "";
+      for (let i = 0; i < out.length; i++) bstr += String.fromCharCode(out[i]);
+      const dataB64 = btoa(bstr);
+      return {
+        bufferId: id,
+        commandId: match.cmd.commandId,
+        entryIndex: match.entryIndex,
+        size: out.length,
+        offset: 0,
+        data: dataB64,
+      };
     },
 
     // --- Shaders ---
