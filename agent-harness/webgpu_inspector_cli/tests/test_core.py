@@ -109,6 +109,137 @@ class TestBridgePaths:
         assert "setTimeout" in bs
         assert "queueMicrotask" not in bs
 
+    def test_find_guard_js(self):
+        from webgpu_inspector_cli.core.bridge import _find_guard_js
+        path = _find_guard_js()
+        assert path.exists()
+        assert path.name == "wgi_guard.js"
+
+    def test_guard_bootstrap_shape(self):
+        """v0.3.0: the guard bootstrap must reference __wgiOptions, expose
+        __wgi.stats, install Object.defineProperty traps, and run as an
+        IIFE so it can be safely concatenated with any other init scripts."""
+        from webgpu_inspector_cli.core.bridge import Bridge
+        guard = Bridge()._build_guard_bootstrap()
+        assert "__wgiOptions" in guard
+        assert "__wgi" in guard
+        assert "Object.defineProperty" in guard
+        assert "maxHooksPerWindow" in guard
+        assert "droppedDueToBurst" in guard
+
+    def test_guard_js_has_burst_guard_contract(self):
+        """The guard JS must expose the documented contract: it reads
+        window.__wgiOptions, traps the GPUDevice/GPUQueue methods that the
+        crash report identified, exposes window.__wgi.stats(), and tracks
+        droppedDueToBurst counts. Pin this so accidental refactors don't
+        break the page-side API documented in README."""
+        from webgpu_inspector_cli.core.bridge import _find_guard_js
+        guard = _find_guard_js().read_text()
+        for needle in [
+            "__wgiOptions",
+            "__wgi.stats",
+            "Object.defineProperty",
+            "maxHooksPerWindow",
+            "windowMs",
+            "droppedDueToBurst",
+            "createBuffer",
+            "createBindGroup",
+            "writeBuffer",
+        ]:
+            assert needle in guard, f"guard contract missing: {needle}"
+
+    def test_inspector_opt_out_skips_injection(self):
+        """v0.3.0: Bridge.launch(inspector=False) must NOT call
+        add_init_script for the guard or loader, and must NOT call _inject().
+        We stub the Playwright pieces so the test can run without a real
+        browser."""
+        from webgpu_inspector_cli.core.bridge import Bridge
+
+        init_script_calls = []
+        inject_calls = []
+
+        class _StubContext:
+            def add_init_script(self, payload):
+                init_script_calls.append(payload)
+            def new_page(self):
+                return _StubPage()
+            def close(self):
+                pass
+
+        class _StubPage:
+            def is_closed(self):
+                return False
+            def goto(self, url, wait_until=None):
+                pass
+            def evaluate(self, *args, **kwargs):
+                return None
+            def close(self):
+                pass
+            def on(self, *args, **kwargs):
+                pass
+
+        class _StubBrowser:
+            def new_context(self):
+                return _StubContext()
+            def close(self):
+                pass
+
+        class _StubChromium:
+            def launch(self, **kwargs):
+                return _StubBrowser()
+            def launch_persistent_context(self, **kwargs):
+                return _StubContext()
+
+        class _StubPlaywright:
+            chromium = _StubChromium()
+            def stop(self):
+                pass
+
+        b = Bridge()
+        # Replace the playwright start so launch() doesn't spawn a real browser.
+        import webgpu_inspector_cli.core.bridge as bridge_mod
+        original_start = bridge_mod.sync_playwright
+
+        def fake_start():
+            class _CM:
+                def start(self):
+                    return _StubPlaywright()
+            return _CM()
+
+        bridge_mod.sync_playwright = fake_start
+        # Also stub _inject so we can confirm it's never called.
+        original_inject = b._inject
+        b._inject = lambda: inject_calls.append(True)
+        try:
+            b.launch("about:blank", inspector=False)
+        finally:
+            bridge_mod.sync_playwright = original_start
+            b._inject = original_inject
+
+        assert init_script_calls == [], (
+            "inspector=False must skip add_init_script calls; got "
+            f"{len(init_script_calls)} call(s)"
+        )
+        assert inject_calls == [], (
+            "inspector=False must skip _inject(); got "
+            f"{len(inject_calls)} call(s)"
+        )
+        assert b._inspector_enabled is False
+
+    def test_inspector_default_logs_warning(self, capsys):
+        """v0.3.0: when the inspector is active (default), the launch path
+        must emit a one-line stderr warning so users know WGI is injected
+        and how to disable it. The warning is what makes opt-out
+        discoverable; if it's silent, users won't find the flag until they
+        crash their machine."""
+        from webgpu_inspector_cli.core.bridge import Bridge
+        b = Bridge()
+        b._inspector_enabled = True
+        b._emit_active_warning()
+        captured = capsys.readouterr()
+        assert "WGI hooks active" in captured.err
+        assert "inspector=False" in captured.err
+
 
 # --- Format Helpers Tests ---
 

@@ -98,6 +98,7 @@ def build_server() -> FastMCP:
         gpu_backend: str | None = None,
         capture_console_path: str | None = None,
         user_data_dir: str | None = None,
+        inspector: bool = True,
     ) -> dict:
         """Launch Chromium, navigate to `url`, and inject the WebGPU Inspector.
 
@@ -107,6 +108,14 @@ def build_server() -> FastMCP:
         - user_data_dir: if set, Chromium uses a persistent profile (cookies,
           localStorage, extensions). Use when the target app needs existing
           browser state.
+        - inspector: if False, skip injecting the WebGPU Inspector entirely.
+          Use for headless probe-style runs where you only need Playwright
+          control + console capture (no GPU object inspection, no shader
+          editing, no frame capture). The inspector hooks every WebGPU call
+          synchronously; bursty workloads (e.g. gsplat LOD streaming) can
+          crash the GPU driver. Default True preserves the inspection
+          surface; flip to False if the inspected app does heavy bursty
+          WebGPU work and you don't need GPU object inspection right now.
         """
         def _impl():
             bridge = get_bridge()
@@ -119,6 +128,7 @@ def build_server() -> FastMCP:
                 gpu_backend=gpu_backend,
                 capture_console_path=capture_console_path,
                 user_data_dir=user_data_dir,
+                inspector=inspector,
             )
             info = bridge.get_browser_info()
             # Probe the GPU adapter so the response reflects whether WebGPU

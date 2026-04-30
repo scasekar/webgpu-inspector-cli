@@ -118,6 +118,35 @@ webgpu-inspector-cli                              # enter REPL
 
 The MCP server holds the Bridge for its full lifetime. The CLI binds the Bridge to a single Python process — so REPL is the multi-step CLI flow.
 
+## Heavy WebGPU workloads — when to disable the inspector
+
+The WebGPU Inspector hooks every `createBuffer`, `createBindGroup`, `writeBuffer`, etc. with a synchronous wrapper that runs `JSON.stringify(descriptor)` and dispatches a `CustomEvent` on the main thread. Apps that issue large bursts of WebGPU operations (e.g. gsplat LOD streaming: ~50 `createBuffer` + `writeBuffer` + `createBindGroup` cycles inside ~2 s) can overload that bookkeeping path. On macOS this has been observed to trigger a hard kernel-class crash requiring a cold reboot. See `UPSTREAM-ISSUE-DRAFT.md` for the upstream-side fixes.
+
+**Mitigations shipped in v0.3.0:**
+
+1. **`inspector=False` opt-out** — skip injection entirely when you only need Playwright control + console capture:
+
+   ```python
+   from webgpu_inspector_cli.core.bridge import Bridge
+   b = Bridge()
+   b.launch("https://your-app.com", inspector=False, capture_console_path="/tmp/console.log")
+   ```
+
+   Same flag on the MCP tool: `browser_launch(url=..., inspector=False)`.
+
+2. **In-page burst guard** — when `inspector=True` (default), a setter-trap script wraps the inspector's hooks with a rolling-window throttle. Under burst (>200 hooked calls within 100 ms), excess calls bypass the inspector wrapper and call the real GPU method directly — the GPU work proceeds, the inspector just misses bookkeeping for the dropped calls. Read counters from the page:
+
+   ```js
+   window.__wgi.stats()
+   // { hookInvocations, droppedDueToBurst, perMethod, options: { maxHooksPerWindow, windowMs } }
+   ```
+
+   Tune via `window.__wgiOptions = { maxHooksPerWindow: 500, windowMs: 100 }` set BEFORE the inspector loads (e.g. in a `<script>` near the top of `<head>`).
+
+3. **Stderr warning at launch** — every `Bridge.launch()` with the inspector active prints a one-line warning so the opt-out is discoverable.
+
+If you keep hitting `droppedDueToBurst > 0` and need full inspection coverage, the right fix is upstream — see `UPSTREAM-ISSUE-DRAFT.md`.
+
 ## CLI / MCP command surface
 
 Every CLI command has a 1:1 MCP tool counterpart. The MCP tool names are the underscore form (`browser_launch` ↔ `browser launch`).

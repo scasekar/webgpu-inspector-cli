@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,15 @@ def _find_collector_js():
     raise FileNotFoundError(f"Could not find collector.js at {collector_path}")
 
 
+def _find_guard_js():
+    """Locate the wgi_guard.js burst-guard script bundled with this package."""
+    js_dir = Path(__file__).resolve().parent.parent / "js"
+    guard_path = js_dir / "wgi_guard.js"
+    if guard_path.exists():
+        return guard_path
+    raise FileNotFoundError(f"Could not find wgi_guard.js at {guard_path}")
+
+
 class Bridge:
     """Manages browser lifecycle, inspector injection, and communication."""
 
@@ -41,6 +51,7 @@ class Bridge:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._inspector_injected = False
+        self._inspector_enabled = True
         self._console_log_file = None
 
     @property
@@ -58,6 +69,7 @@ class Bridge:
         gpu_backend: str | None = None,
         capture_console_path: str | None = None,
         user_data_dir: str | None = None,
+        inspector: bool = True,
     ):
         """Launch browser, navigate to URL, and inject the inspector.
 
@@ -67,7 +79,15 @@ class Bridge:
         user_data_dir: if set, Chrome runs with a persistent profile directory
             (cookies, localStorage, extensions). Useful when the target app
             depends on existing browser state.
+        inspector: if False, skip injecting the WebGPU Inspector loader and
+            collector entirely. Use for headless probe-style runs that only
+            need Playwright control + console capture. The inspector hooks
+            run synchronous JSON.stringify + CustomEvent dispatch on every
+            createBuffer / writeBuffer / createBindGroup call, which can
+            crash the macOS GPU driver under bursty workloads (e.g. gsplat
+            LOD streaming). Default True preserves existing behavior.
         """
+        self._inspector_enabled = inspector
         self._playwright = sync_playwright().start()
 
         args = [
@@ -102,7 +122,16 @@ class Bridge:
         # only to React-side render code. add_init_script must be registered
         # on the context BEFORE new_page() so the init script fires on the
         # page's first navigation.
-        self._context.add_init_script(self._build_loader_bootstrap())
+        #
+        # Order matters: the burst-guard runs FIRST so it can install setter
+        # traps on GPUDevice / GPUQueue prototypes. When the inspector loader
+        # then assigns its wrapper functions, the guard wraps them with a
+        # rolling-window throttle that bypasses the inspector under burst
+        # (mitigates the macOS hard kernel panic seen with gsplat-style
+        # workloads). When `inspector=False`, neither runs.
+        if self._inspector_enabled:
+            self._context.add_init_script(self._build_guard_bootstrap())
+            self._context.add_init_script(self._build_loader_bootstrap())
 
         if user_data_dir:
             # launch_persistent_context starts with one default page.
@@ -115,7 +144,9 @@ class Bridge:
             self._attach_console_capture(capture_console_path)
 
         self._page.goto(url, wait_until="domcontentloaded")
-        self._inject()
+        if self._inspector_enabled:
+            self._inject()
+            self._emit_active_warning()
 
     def navigate(self, url: str):
         """Navigate to a new URL and re-inject the inspector."""
@@ -125,7 +156,8 @@ class Bridge:
         # The loader bootstrap is registered on the context (via launch), so
         # navigation re-fires it automatically — no need to re-install here.
         self._page.goto(url, wait_until="domcontentloaded")
-        self._inject()
+        if self._inspector_enabled:
+            self._inject()
 
     def close(self):
         """Shut down the browser and clean up resources."""
@@ -206,6 +238,45 @@ class Bridge:
             "}"
             "__wgi_load();"
             "})();"
+        )
+
+    def _build_guard_bootstrap(self) -> str:
+        """Build the burst-guard init-script.
+
+        The guard installs setter traps on GPUDevice / GPUQueue prototype
+        methods BEFORE the inspector loader runs. When the inspector
+        installs its synchronous JSON.stringify + CustomEvent wrappers, the
+        guard wraps each one with a rolling-window throttle. Under burst
+        (>maxHooksPerWindow calls within windowMs), the throttle bypasses
+        the inspector's wrapper and calls the real GPU method directly —
+        the GPU work still happens, only hook bookkeeping is dropped.
+
+        Mitigates the macOS hard kernel panic seen with bursty WebGPU
+        workloads (e.g. gsplat LOD streaming: ~50 createBuffer + writeBuffer
+        + createBindGroup cycles in 2 s). See UPSTREAM-ISSUE-DRAFT.md for
+        the deeper hook-side fixes the upstream library should make.
+        """
+        guard_js = _find_guard_js().read_text()
+        # The guard is already wrapped in its own IIFE and is safe to run
+        # before document.documentElement exists (it touches only globals
+        # and prototypes, never DOM). Inject it raw via add_init_script.
+        return guard_js
+
+    def _emit_active_warning(self) -> None:
+        """Print a one-line stderr warning when the inspector is active.
+
+        Heavy WebGPU workloads can crash the GPU driver via the inspector's
+        synchronous-on-every-call hooks; users who only need Playwright
+        control + console capture should pass `inspector=False`.
+        """
+        print(
+            "[webgpu-inspector-cli] WGI hooks active. "
+            "If you only need Playwright control + console capture, "
+            "pass inspector=False (Bridge.launch / browser_launch) — "
+            "heavy WebGPU workloads can crash the GPU driver. "
+            "See UPSTREAM-ISSUE-DRAFT.md.",
+            file=sys.stderr,
+            flush=True,
         )
 
     def _inject(self):
